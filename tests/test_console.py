@@ -559,6 +559,8 @@ def test_recording_and_evidence_export(window, tmp_path):
 def test_route_overlay_replaces_expires_and_clear_is_local(window, monkeypatch):
     import numpy as np
 
+    from map_tracks import PLAN_TTL_NS
+
     w = window
     monkeypatch.setattr(gs.Radio, "start", lambda self: None)
     monkeypatch.setattr(gs.Radio, "close", lambda self: None)
@@ -570,28 +572,35 @@ def test_route_overlay_replaces_expires_and_clear_is_local(window, monkeypatch):
     w.radio.ready = True
     data = np.array([400000000, -830000000, 400000050, -830000100], dtype=np.int32)
 
-    def receive(stamp, values):
+    start_ns = time.time_ns() + 1_000_000
+
+    def receive(offset_ms, values):
+        monkeypatch.setattr(time, "time_ns", lambda: start_ns + offset_ms * 1_000_000)
+        stamp = w.codec.stamp()
         msg = w.codec.types["PlanPreview"](stamp, values)
         w.radio.receive(25, w.codec.encode(msg))
         w.tick()
 
-    first = w.codec.stamp()
-    receive(first, data)
+    receive(0, data)
     tracks = w.runway.tracks
     assert tracks.plan == ((40.0, -83.0), (40.000005, -83.00001))
-    receive(first, data[::-1].copy())
+    receive(0, data[::-1].copy())
     assert tracks.plan[0] == (40.0, -83.0)
     tracks.fix(time.time_ns(), (40.0, -83.0))
     w.tick()
     w.clear_track.click()
     assert not tracks.fixes and tracks.plan and not w.clear_track.isEnabled()
-    receive(w.codec.stamp(), np.array([1, 2], dtype=np.int32))
+    receive(100, np.array([1, 2], dtype=np.int32))
     assert tracks.plan[0] == (40.0, -83.0)
-    receive(w.codec.stamp(), np.array([], dtype=np.int32))
+    receive(200, np.array([], dtype=np.int32))
     assert not tracks.plan
-    receive(w.codec.stamp(), data)
-    assert tracks.expire(time.time_ns() + 11_000_000_000) and not tracks.plan
-    receive(w.codec.stamp(), data)
+    receive(300, data)
+    assert tracks.plan
+    expiry = start_ns + 300_000_000 + PLAN_TTL_NS
+    assert not tracks.expire(expiry)
+    assert tracks.expire(expiry + 1) and not tracks.plan
+    receive(400, data)
+    assert tracks.plan
     w.radio.ready = False
     w.tick()
     assert not tracks.plan
