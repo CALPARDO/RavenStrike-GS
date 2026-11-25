@@ -36,6 +36,7 @@ def evidence(st, mission, kind, token, sec=2, **extra):
         "kind": kind,
         "evidence_id": token,
         "stamp": N(sec=sec, nanosec=0),
+        "image_stamp": N(sec=sec, nanosec=0),
         "preview": N(format="", data=b""),
     }
     msg = N(**(values | extra))
@@ -112,7 +113,7 @@ def test_outcome_can_arrive_before_radio_ack(station):
     report(4, "blocked")
     st.task_ack(7, 123, time.time_ns())
     st.task_ack(7, 123, time.time_ns())
-    stages = [line.split(" UTC   ", 1)[1] for line in st.timeline[mission]]
+    stages = [line.split("   ", 1)[1] for line in st.timeline[mission]]
     assert stages == ["Sent to radio queue", "Blocked · task rejected", "Radio ACK"]
     status(st, "", "complete", 6, "completed")
     st.start("UGV-1", "next", (0.0, 0.0, 0.0))

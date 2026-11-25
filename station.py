@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from display import eastern
+
 
 def contents(value):
     if is_dataclass(value):
@@ -58,6 +60,7 @@ class Station:
         self.scanned = self.scanning_requested = self.abort_requested = self.review = False
         self.last_status = -1
         self.records = {}
+        self.image_times = {}
         self.latest = {}
         self.decisions = set()
         self.targets = {}
@@ -70,8 +73,8 @@ class Station:
         self.selection_stamp = -1
 
     def record(self, mission, text, when=None):
-        utc = datetime.fromtimestamp((when or time.time_ns()) / 1e9, UTC).strftime("%H:%M:%S")
-        self.timeline.setdefault(mission, []).append(f"{utc} UTC   {text}")
+        clock = eastern((when or time.time_ns()) / 1e9)
+        self.timeline.setdefault(mission, []).append(f"{clock}   {text}")
 
     def task_ack(self, topic, wire_id, when):
         if topic == 7 and (mission := self.pending_tasks.pop(wire_id, None)):
@@ -273,6 +276,7 @@ class Station:
                     raise ValueError("Invalid JPEG preview or checksum.")
                 path = self.journal.folder / "evidence" / (digest + ".jpg")
                 path.write_bytes(data)
+            self.image_times[token] = msg.image_stamp.sec * 10**9 + msg.image_stamp.nanosec
             self.records[token] = (kind, path, stamp)
             key = (msg.mission_id, "before" if kind == "before" else "review")
             prior = self.latest.get(key)

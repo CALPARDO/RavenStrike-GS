@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from demo_site import OBSTACLES_XY
+from runway_map import obstacle_point
+
 
 class GroundTrack(QWidget):
     def __init__(self, trace):
@@ -23,7 +26,7 @@ class GroundTrack(QWidget):
         self.trace = trace
         self.elapsed = 0
         self.setMinimumSize(360, 200)
-        points = [row[1:3] for row in trace["fixes"]] + [trace["target"]]
+        points = [row[1:3] for row in trace["fixes"]] + [trace["target"], *OBSTACLES_XY]
         self.bounds = [
             min(x for x, y in points),
             max(x for x, y in points),
@@ -56,6 +59,12 @@ class GroundTrack(QWidget):
             p.drawLine(0, py, self.width(), py)
         p.setPen(QColor("#436369"))
         p.drawText(14, 22, "N ↑    ·    1 m grid")
+        obstacle_point(p, QPointF(self.width() - 110, 17))
+        p.setPen(QColor("#563d15"))
+        p.drawText(self.width() - 97, 22, "Sim obstacle")
+        for xy in OBSTACLES_XY:
+            obstacle_point(p, project(*xy))
+        p.setBrush(Qt.BrushStyle.NoBrush)
         fixes = [f for f in self.trace["fixes"] if f[0] <= self.elapsed]
         p.setPen(QPen(QColor("#148779"), 3))
         p.drawPolyline(QPolygonF([project(x, y) for _, x, y, _ in fixes]))

@@ -1,4 +1,4 @@
-"""CDR payloads for the published UGV v5 radio map."""
+"""CDR payloads for the UGV v8 radio map."""
 
 import math
 import time
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 
-WIRE_MAP_VERSION = 5
+WIRE_MAP_VERSION = 8
 CONTRACT = Path(__file__).resolve().parent / "contract"
 
 

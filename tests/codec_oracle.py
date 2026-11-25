@@ -25,21 +25,25 @@ else:
     from rclpy.serialization import deserialize_message, serialize_message
     from rosidl_runtime_py.utilities import get_message
     from ugv_mission_interfaces.msg import (
-        AppStatus,
         Evidence,
+        FieldStatus,
+        PlanPreview,
         RobotLocation,
         SessionStatus,
     )
 
     if sys.argv[1] == "generate":
         records = [
-            AppStatus(
+            PlanPreview(coordinates_e7=[275178880, -820841530, 275179880, -820842530]),
+            FieldStatus(
                 job_id="a" * 32,
                 app="scenario",
                 state="running",
                 battery_percent=-1,
                 estop=1,
                 mission_adapter_online=True,
+                fsm_state=FieldStatus.FSM_REPOSITIONING_MODE,
+                health=0xE4E4,
             ),
             RobotLocation(latitude_e7=-123456789, longitude_e7=1799999999, heading_cdeg=65535),
             SessionStatus(

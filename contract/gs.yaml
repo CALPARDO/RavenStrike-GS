@@ -1,4 +1,4 @@
-# Mission wire map v5; both endpoints need matching workflow interfaces.
+# Mission wire map v8; both endpoints need matching workflow interfaces.
 # Jetson header and USB bench pair. Match the serial settings on replacement modems.
 # Supply serial_port explicitly and review both endpoint settings.
 bridge_id: ravenstrike_gs
@@ -158,7 +158,7 @@ topics:
     priority: 3
     reliability: latest
     queue_depth: 1
-    max_rate_hz: 1.0
+    max_rate_hz: 2.0
     qos:
       reliability: reliable
       durability: volatile
@@ -178,15 +178,29 @@ topics:
       durability: volatile
       depth: 1
   app_status:
-    id: 22
+    id: 24
     ros_topic: /ravenstrike/radio/tx/app_status
     remote_topic: /ravenstrike/radio/rx/app_status
-    type: ugv_mission_interfaces/msg/AppStatus
+    type: ugv_mission_interfaces/msg/FieldStatus
     direction: rx
     priority: 3
     reliability: latest
     queue_depth: 1
     max_rate_hz: 1.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 1
+  plan_preview:
+    id: 25
+    ros_topic: /ravenstrike/radio/tx/plan_preview
+    remote_topic: /ravenstrike/radio/rx/plan_preview
+    type: ugv_mission_interfaces/msg/PlanPreview
+    direction: rx
+    priority: 4
+    reliability: latest
+    queue_depth: 1
+    max_rate_hz: 0.5
     qos:
       reliability: reliable
       durability: volatile

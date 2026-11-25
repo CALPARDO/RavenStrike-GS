@@ -18,6 +18,7 @@ class FieldEngine(BridgeEngine):
         self.event = event
         self.link_since = None
         self.port_error = ""
+        self.command_times = {}
         self.established = False
         self.lost = False
 
@@ -55,7 +56,12 @@ class FieldEngine(BridgeEngine):
         if payload and payload[0] in (CTRL_ACK, CTRL_NACK):
             try:
                 nack, topic, mid = unpack_ack(payload)
-                self.event("nack" if nack else "ack", topic=topic, wire_id=mid)
+                fields = {}
+                if not nack:
+                    start = self.command_times.pop((topic, mid), None)
+                    if start is not None:
+                        fields["turnaround_ms"] = (time.monotonic_ns() - start) / 1e6
+                self.event("nack" if nack else "ack", topic=topic, wire_id=mid, **fields)
             except ValueError:
                 pass
         super()._handle_control(payload)
@@ -92,7 +98,7 @@ class Radio:
             self.overflow.set()
 
     def receive(self, topic, payload):
-        self.event("incoming", topic=topic, payload=payload)
+        self.event("incoming", topic=topic, payload=payload, arrival_mono=time.monotonic())
 
     def run(self):
         previous = None
@@ -129,9 +135,14 @@ class Radio:
         with self.engine._lock:
             if not self.ready or not self.engine.check_link() or self.overflow.is_set():
                 raise ValueError("A healthy radio connection is required.")
+            queued = time.monotonic_ns()
             mid = self.engine._next_message_id
             if not self.engine.enqueue(self.engine.topics[topic], self.codec.encode(msg)):
                 raise ValueError("Radio transmit queue rejected the command.")
+            times = self.engine.command_times
+            if len(times) >= self.engine.config.link.max_reliable_pending:
+                times.pop(next(iter(times)))
+            times[(topic, mid)] = queued
             return mid
 
     def close(self):

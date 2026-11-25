@@ -4,20 +4,98 @@ import math
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, QStandardPaths, Qt, QUrl
+from PySide6.QtCore import (
+    QPointF,
+    QRect,
+    QRectF,
+    QStandardPaths,
+    Qt,
+    QTimer,
+    QUrl,
+    QUrlQuery,
+    Signal,
+)
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtNetwork import (
+    QNetworkAccessManager,
+    QNetworkDiskCache,
+    QNetworkReply,
+    QNetworkRequest,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QHBoxLayout,
+    QPushButton,
+    QWidget,
+)
+
+from demo_site import SITE, SITE_ZOOM
+from display import TargetNames
+from map_tracks import GPS_GAP_NS, MapTracks
+
+
+def tile_url(layer, z, x, y):
+    if layer == "Street":
+        return QUrl(f"https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    if z <= 16:
+        return QUrl(
+            f"https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}"
+        )
+    # Higher-detail US NAIP aerial imagery, requested on the same Mercator grid.
+    half_world = 20037508.342789244
+    side = 2 * half_world / 2**z
+    west, north = x * side - half_world, half_world - y * side
+    url = QUrl(
+        "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/exportImage"
+    )
+    query = QUrlQuery()
+    query.addQueryItem(
+        "bbox", ",".join(f"{v:.6f}" for v in (west, north - side, west + side, north))
+    )
+    for name, value in (
+        ("bboxSR", "3857"),
+        ("imageSR", "3857"),
+        ("size", "256,256"),
+        ("format", "jpg"),
+        ("f", "image"),
+    ):
+        query.addQueryItem(name, value)
+    url.setQuery(query)
+    return url
+
+
+def obstacle_point(painter, pt):
+    painter.setPen(QPen(QColor("#382c1f"), 2))
+    painter.setBrush(QColor("#ffc15c"))
+    painter.drawPolygon(
+        QPolygonF(
+            [pt + QPointF(0, -6), pt + QPointF(6, 0), pt + QPointF(0, 6), pt + QPointF(-6, 0)]
+        )
+    )
 
 
 class RunwayMap(QWidget):
+    pointPicked = Signal(float, float)
+    targetPicked = Signal(str)
+    panned = Signal()
+
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(195)
-        self.center = self.robot = None
+        self.center = SITE
+        self.initial_view = True
+        self.robot = self.last_known = None
+        self.obstacles = ()
+        self.layer = "Satellite"
+        self.overview = QPixmap(str(Path(__file__).resolve().parent / "demo" / "site-overview.jpg"))
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.selected = ""
+        self.tracks = MapTracks()
         self.preview_location = self.drag = None
-        self.zoom = 18
+        self.zoom = SITE_ZOOM
         self.targets = {}
+        self.target_name = TargetNames()
         self.active = ""
         self.network = QNetworkAccessManager(self)
         cache = QNetworkDiskCache(self)
@@ -32,10 +110,40 @@ class RunwayMap(QWidget):
         self.tiles = {}
         self.pending = set()
         self.failed = set()
+        self.retry = QTimer(self)
+        self.retry.setSingleShot(True)
+        self.retry.timeout.connect(self.retry_tiles)
+
+    def retry_tiles(self):
+        self.failed.clear()
+        self.update()
+
+    def layer_switch(self):
+        switch = QWidget()
+        switch.setObjectName("layerSwitch")
+        row = QHBoxLayout(switch)
+        row.setContentsMargins(2, 2, 2, 2)
+        row.setSpacing(0)
+        group = QButtonGroup(switch)
+        for name in ("Satellite", "Street"):
+            btn = QPushButton(name)
+            btn.setAccessibleName(f"{name} basemap")
+            btn.setObjectName("layerButton")
+            btn.setCheckable(True)
+            btn.setChecked(name == self.layer)
+            group.addButton(btn)
+            row.addWidget(btn)
+        group.buttonClicked.connect(lambda button: self.set_layer(button.text()))
+        return switch
+
+    def set_layer(self, name):
+        self.layer = name
+        self.retry_tiles()
 
     def preview(self, lat, lon):
         if not (-85.0511 <= lat <= 85.0511 and -180 <= lon <= 180):
-            raise ValueError("The street map covers latitudes within ±85.05°.")
+            raise ValueError("The map covers latitudes within ±85.05°.")
+        self.initial_view = False
         self.preview_location = self.center = lat, lon
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.failed.clear()
@@ -46,11 +154,46 @@ class RunwayMap(QWidget):
         angle = math.radians(max(-85.0511, min(85.0511, lat)))
         return (lon + 180) / 360 * n, (1 - math.asinh(math.tan(angle)) / math.pi) * n / 2
 
+    def screen_point(self, location):
+        cx, cy = self.pixel(*self.center)
+        x, y = self.pixel(*location)
+        width = 256 * 2**self.zoom
+        return QPointF(
+            self.width() / 2 + (x - cx + width / 2) % width - width / 2,
+            self.height() / 2 + y - cy,
+        )
+
+    def fit_targets(self):
+        points = [p for p in self.targets.values() if abs(p[0]) <= 85.0511]
+        points.extend(self.obstacles)
+        points.extend(p for p in self.tracks.ahead if abs(p[0]) <= 85.0511)
+        points.extend(p for _, p in self.tracks.fixes if abs(p[0]) <= 85.0511)
+        if self.robot or self.last_known:
+            points.append((self.robot or self.last_known)[:2])
+        if not points:
+            return
+        self.initial_view = False
+        # Cut the longitude circle at its largest gap so targets across 180° stay together.
+        lons = sorted(lon % 360 for _, lon in points)
+        gaps = [b - a for a, b in zip(lons, lons[1:] + [lons[0] + 360])]
+        cut = gaps.index(max(gaps))
+        west = lons[(cut + 1) % len(lons)]
+        lon = (west + (360 - max(gaps)) / 2 + 180) % 360 - 180
+        ys = [math.asinh(math.tan(math.radians(lat))) for lat, _ in points]
+        self.center = math.degrees(math.atan(math.sinh((min(ys) + max(ys)) / 2))), lon
+        for zoom in range(24, 2, -1):
+            self.zoom = zoom
+            if all(
+                self.rect().adjusted(30, 20, -30, -20).contains(self.screen_point(p).toPoint())
+                for p in points
+            ):
+                break
+        self.update()
+
     def load(self, key):
         if key in self.pending or key in self.failed or len(self.pending) >= 12:
             return
-        z, x, y = key
-        request = QNetworkRequest(QUrl(f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"))
+        request = QNetworkRequest(tile_url(*key))
         request.setRawHeader(
             b"User-Agent", b"RavenStrike-GS/0.1 (runway debris research ground station)"
         )
@@ -58,7 +201,7 @@ class RunwayMap(QWidget):
             QNetworkRequest.Attribute.CacheLoadControlAttribute,
             QNetworkRequest.CacheLoadControl.PreferCache,
         )
-        request.setTransferTimeout(6000)
+        request.setTransferTimeout(20000)
         self.pending.add(key)
         reply = self.network.get(request)
         reply.finished.connect(partial(self.received, key, reply))
@@ -66,25 +209,38 @@ class RunwayMap(QWidget):
     def received(self, key, reply):
         self.pending.discard(key)
         tile = QPixmap()
-        if tile.loadFromData(reply.readAll(), "PNG"):
+        if (
+            reply.error() == QNetworkReply.NetworkError.NoError
+            and tile.loadFromData(reply.readAll())
+            and tile.width() == tile.height() == 256
+        ):
             if len(self.tiles) >= 96:
                 self.tiles.pop(next(iter(self.tiles)))
             self.tiles[key] = tile
         else:
             self.failed.add(key)
+            if not self.retry.isActive():
+                self.retry.start(30_000)
         reply.deleteLater()
         self.update()
 
     def reset_view(self):
-        self.center = self.preview_location = self.drag = None
+        self.center, self.zoom = SITE, SITE_ZOOM
+        self.initial_view = True
+        self.obstacles = ()
+        self.preview_location = self.drag = None
         self.active = ""
         self.targets.clear()
-        self.unsetCursor()
+        self.target_name = TargetNames()
+        self.robot = self.last_known = None
+        self.tracks = MapTracks()
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.update()
 
     def change_zoom(self, steps):
         if self.center:
-            self.zoom = max(3, min(19, self.zoom + steps))
+            self.initial_view = False
+            self.zoom = max(3, min(24, self.zoom + steps))
             self.update()
 
     def wheelEvent(self, event):
@@ -101,6 +257,10 @@ class RunwayMap(QWidget):
         if self.drag:
             start, (x, y) = self.drag
             delta = event.position() - start
+            if delta.manhattanLength() < QApplication.startDragDistance():
+                return
+            self.initial_view = False
+            self.panned.emit()
             size = 256 * 2**self.zoom
             y = max(0, min(1, (y - delta.y()) / size))
             self.center = (
@@ -111,57 +271,189 @@ class RunwayMap(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self.drag and event.button() == Qt.MouseButton.LeftButton:
+            start, (x, y) = self.drag
             self.drag = None
+            pos = event.position()
+            if (pos - start).manhattanLength() < QApplication.startDragDistance():
+                nearest = min(
+                    self.targets,
+                    key=lambda key: (self.screen_point(self.targets[key]) - pos).manhattanLength(),
+                    default=None,
+                )
+                if (
+                    nearest
+                    and (self.screen_point(self.targets[nearest]) - pos).manhattanLength() <= 12
+                ):
+                    self.targetPicked.emit(nearest)
+                else:
+                    size = 256 * 2**self.zoom
+                    fy = max(0, min(1, (y + pos.y() - self.height() / 2) / size))
+                    lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * fy))))
+                    lon = (x + pos.x() - self.width() / 2) / size * 360 % 360 - 180
+                    self.pointPicked.emit(lat, lon)
             self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def draw_tracks(self, painter):
+        def stroke(segment, color, width, style):
+            if not segment:
+                return
+            line = QPolygonF(segment)
+            for ink, size, pattern in (
+                ("#ffffff", width + 2, Qt.PenStyle.SolidLine),
+                (color, width, style),
+            ):
+                painter.setPen(
+                    QPen(
+                        QColor(ink),
+                        size,
+                        pattern,
+                        Qt.PenCapStyle.RoundCap,
+                        Qt.PenJoinStyle.RoundJoin,
+                    )
+                )
+                painter.drawPolyline(line)
+            if style == Qt.PenStyle.SolidLine:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color))
+                previous = None
+                for pt in segment:
+                    if previous is None or (pt - previous).manhattanLength() >= 15:
+                        painter.drawEllipse(pt, 2.7, 2.7)
+                        previous = pt
+
+        def segments(samples, color, width, style):
+            line = []
+            last = None
+            for stamp, coords in samples:
+                valid = abs(coords[0]) <= 85.0511
+                pt = self.screen_point(coords)
+                if not valid or (
+                    line
+                    and (
+                        stamp - last > GPS_GAP_NS or abs(pt.x() - line[-1].x()) > 128 * 2**self.zoom
+                    )
+                ):
+                    stroke(line, color, width, style)
+                    line = []
+                if valid:
+                    line.append(pt)
+                last = stamp
+            stroke(line, color, width, style)
+
+        segments(((0, p) for p in self.tracks.ahead), "#3b5cc4", 5, Qt.PenStyle.DashLine)
+        segments(self.tracks.fixes, "#007b68", 2.6, Qt.PenStyle.SolidLine)
+        painter.setPen(QPen(QColor("#3b5cc4"), 1.6))
+        painter.setBrush(Qt.GlobalColor.white)
+        for coords in self.tracks.ahead[1:]:
+            if abs(coords[0]) <= 85.0511:
+                painter.drawEllipse(self.screen_point(coords), 3.3, 3.3)
+
+    def map_label(self, painter, anchor, text):
+        box = QRectF(painter.fontMetrics().boundingRect(text)).adjusted(-5, -2, 5, 2)
+        box.moveBottomLeft(anchor)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 39, 47, 225))
+        painter.drawRoundedRect(box, 3, 3)
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#eaf1f0"))
-        if self.center is None:
-            # A blank plotting grid, with no invented site or robot position.
-            p.setPen(QPen(QColor("#d3e1df"), 1))
-            for x in range(self.width() // 2 % 32, self.width(), 32):
-                p.drawLine(x, 0, x, self.height())
-            for y in range(self.height() // 2 % 32, self.height(), 32):
-                p.drawLine(0, y, self.width(), y)
-            message = "Preview a location to load the map"
-            w = p.fontMetrics().horizontalAdvance(message) + 32
-            plate = QRect((self.width() - w) // 2, (self.height() - 36) // 2, w, 36)
-            p.fillRect(plate, QColor("#ffffff"))
-            p.setPen(QColor("#365851"))
-            p.drawText(plate, Qt.AlignmentFlag.AlignCenter, message)
-            return
         cx, cy = self.pixel(*self.center)
         left, top = round(cx - self.width() / 2), round(cy - self.height() / 2)
         count = 2**self.zoom
-        for x in range(left // 256, (left + self.width()) // 256 + 1):
-            for y in range(max(0, top // 256), min(count, (top + self.height()) // 256 + 1)):
-                key = self.zoom, x % count, y
+        # Magnify the last available basemap level for metre-scale robot manoeuvres.
+        tile_zoom = min(self.zoom, 19)
+        tile_count = 2**tile_zoom
+        tile_size = 256 * 2 ** (self.zoom - tile_zoom)
+        # The bundled NAIP site image is centred on SITE at the level-18 pixel scale.
+        # Clip before drawing so metre-scale overzoom never allocates a huge bitmap.
+        overview_rect = QRectF()
+        if self.layer == "Satellite" and not self.overview.isNull():
+            factor = 2.0 ** (self.zoom - 18)
+            overview_rect = QRectF(
+                0, 0, self.overview.width() * factor, self.overview.height() * factor
+            )
+            overview_rect.moveCenter(self.screen_point(SITE))
+            dst = overview_rect.intersected(QRectF(self.rect()))
+            if not dst.isEmpty():
+                src = QRectF(
+                    (dst.x() - overview_rect.x()) / factor,
+                    (dst.y() - overview_rect.y()) / factor,
+                    dst.width() / factor,
+                    dst.height() / factor,
+                )
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                p.drawPixmap(dst, self.overview, src)
+        missing = visible = False
+        for x in range(left // tile_size, (left + self.width()) // tile_size + 1):
+            for y in range(
+                max(0, top // tile_size), min(tile_count, (top + self.height()) // tile_size + 1)
+            ):
+                key = self.layer, tile_zoom, x % tile_count, y
+                tile_rect = QRect(x * tile_size - left, y * tile_size - top, tile_size, tile_size)
+                if self.zoom >= 17 and overview_rect.contains(
+                    QRectF(tile_rect.intersected(self.rect()))
+                ):
+                    visible = True
+                    # This area already has level-18 imagery.
+                    if tile_zoom <= 18:
+                        continue
+                    if key not in self.tiles:
+                        self.load(key)
+                        continue
                 if key in self.tiles:
-                    p.drawPixmap(x * 256 - left, y * 256 - top, self.tiles[key])
+                    visible = True
+                    p.drawPixmap(
+                        QRect(x * tile_size - left, y * tile_size - top, tile_size, tile_size),
+                        self.tiles[key],
+                    )
                 else:
+                    missing |= key in self.failed
+                    # While overzoomed, keep the visible parent tile until finer detail loads.
+                    for levels in range(1, min(tile_zoom, 5) + 1):
+                        scale = 2**levels
+                        parent = (self.layer, tile_zoom - levels, key[2] // scale, y // scale)
+                        if parent in self.tiles:
+                            part = 256 // scale
+                            p.drawPixmap(
+                                QRect(
+                                    x * tile_size - left, y * tile_size - top, tile_size, tile_size
+                                ),
+                                self.tiles[parent],
+                                QRect(key[2] % scale * part, y % scale * part, part, part),
+                            )
+                            visible = True
+                            break
                     self.load(key)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.draw_tracks(p)
 
-        def screen_point(location):
-            x, y = self.pixel(*location)
-            width = count * 256
-            x = cx + (x - cx + width / 2) % width - width / 2
-            return QPointF(x - left, y - top)
+        for coord in self.obstacles:
+            obstacle_point(p, self.screen_point(coord))
 
         for name, location in self.targets.items():
-            pt = screen_point(location)
+            pt = self.screen_point(location)
             p.setPen(QPen(Qt.GlobalColor.white, 2))
             p.setBrush(QColor("#bb4c15" if name == self.active else "#186784"))
             p.drawEllipse(pt, 6, 6)
-            p.setPen(Qt.GlobalColor.black)
-            p.drawText(pt + QPointF(9, 4), name)
+            if name == self.selected:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor("#09685f"), 2))
+                p.drawEllipse(pt, 10, 10)
+            self.map_label(p, pt + QPointF(10, -6), self.target_name(name))
         p.setPen(QPen(QColor("#252c35"), 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
         if self.preview_location:
-            p.drawEllipse(screen_point(self.preview_location), 9, 9)
+            p.drawEllipse(self.screen_point(self.preview_location), 9, 9)
+        if self.last_known and not self.robot:
+            pt = self.screen_point(self.last_known)
+            p.setPen(QPen(QColor("#65727c"), 2, Qt.PenStyle.DashLine))
+            p.drawEllipse(pt, 8, 8)
+            self.map_label(p, pt + QPointF(12, -7), "Last fix")
         if self.robot:
-            pt = screen_point(self.robot[:2])
+            pt = self.screen_point(self.robot[:2])
             p.save()
             p.translate(pt)
             p.setPen(QPen(Qt.GlobalColor.white, 2))
@@ -176,7 +468,7 @@ class RunwayMap(QWidget):
                 )
             p.restore()
             p.setPen(QColor("#253b72"))
-            p.drawText(pt + QPointF(11, -6), "UGV")
+            self.map_label(p, pt + QPointF(11, -6), "UGV")
         # Ground distance represented by one Web Mercator screen pixel at the center.
         metres_per_px = 40075016.686 * math.cos(math.radians(self.center[0])) / (256 * count)
         ideal = max(1, metres_per_px * 72)
@@ -192,9 +484,17 @@ class RunwayMap(QWidget):
         p.drawLine(15, y, 15 + pixels, y)
         p.drawLine(15, y - 4, 15, y)
         p.drawLine(15 + pixels, y - 4, 15 + pixels, y)
-        caption = "© OpenStreetMap contributors"
-        if self.failed:
-            caption = "Map tiles unavailable   ·   " + caption
+        caption = (
+            "USGS · The National Map / USDA NAIP"
+            if self.layer == "Satellite"
+            else "© OpenStreetMap contributors"
+        )
+        if missing:
+            caption = (
+                ("Some tiles unavailable" if visible else "Basemap unavailable")
+                + "   ·   "
+                + caption
+            )
         width = p.fontMetrics().horizontalAdvance(caption) + 12
         box = QRect(self.width() - width, self.height() - 21, width, 21)
         p.fillRect(box, Qt.GlobalColor.white)
