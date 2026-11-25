@@ -6,3 +6,5 @@ logs/
 build/
 dist/
 *.spec
+BUILD_ID
+.ruff_cache/

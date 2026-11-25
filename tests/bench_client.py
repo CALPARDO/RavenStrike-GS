@@ -5,6 +5,7 @@ import signal
 import socket
 import sys
 import time
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
@@ -31,7 +32,15 @@ def wait(predicate, timeout=20):
 
 try:
     wait(lambda: w.start.isEnabled())
-    time.sleep(0.7)
+    wait(lambda: w.runway.robot is not None and w.runway.robot[2] is not None)
+    assert w.locate.isEnabled() and not w.station.session
+    if len(sys.argv) != 4:
+        assert w.runway.robot == (40.0, -83.0, 180.0)
+    print(
+        "PASS: live position and true heading over radio before session",
+        w.runway.robot,
+        flush=True,
+    )
     if len(sys.argv) == 4:
         w.station.start(sys.argv[1], "field-console-bench", (0.0, 0.0, 0.0))
         wait(lambda: w.submit.isEnabled())
@@ -46,13 +55,29 @@ try:
         assert w.approve.text() == "Approve removal" and not w.pictures[1].pixmap().isNull()
         assert w.grab().save(str(w.journal.folder / "operator-review.png"))
         w.approve.click()
-        wait(lambda: w.station.state == "completed" and mission in w.station.final_reports, 120)
+        wait(
+            lambda: w.station.state == "completed" and mission in w.station.final_reports,
+            120,
+        )
         assert w.station.targets[mission].startswith("completed")
+        timeline = w.timeline.toPlainText()
+        for event in (
+            "Sent to radio queue",
+            "Radio ACK",
+            "UGV accepted",
+            "Active",
+            "Awaiting operator review",
+            "Operator requested approve removal",
+            "Completed",
+        ):
+            assert event in timeline, timeline
+        print("PASS: selected FOD timeline\n" + timeline, flush=True)
         print(
             "PASS: field client received final task and session completion.",
             w.journal.folder,
             flush=True,
         )
+        Path(os.environ["GS_BENCH_JOURNAL"]).write_text(str(w.journal.folder))
         sys.exit(0)
     for area, button in [
         ("bench-cycle", "Continue"),
@@ -61,13 +86,23 @@ try:
     ]:
         w.station.start(sys.argv[1], area, (0.0, 0.0, 0.0))
         wait(lambda: w.submit.isEnabled())
+        if area == "bench-cycle":
+            wait(lambda: w.robot_caption.text() == "UGV location stale")
+            assert w.runway.robot is None and not w.locate.isEnabled()
+        elif area == "bench-image":
+            wait(lambda: w.runway.robot == (40.0, -83.0, None))
+        else:
+            wait(lambda: w.runway.robot == (40.0, -83.0, 180.0))
         for edit, value in zip(w.coords, ["40", "-82.99997", "200"]):
             edit.setText(value)
         w.submit.click()
-        wait(lambda: w.approve.isEnabled())
+        start_stamp = w.track.stamp
+        wait(lambda: w.approve.isEnabled(), 35)
         assert w.approve.text() == button and w.retry.isEnabled() == (area != "bench-cycle")
         if area == "bench-image":
             wait(lambda: not w.pictures[0].pixmap().isNull())
+            assert w.track.stamp > start_stamp and w.track.current() is not None
+            print("PASS: location refreshed during field-sized JPEG review", flush=True)
         (w.retry if area == "bench-search" else w.approve).click()
         wait(
             lambda: (
@@ -85,11 +120,12 @@ try:
     app.processEvents()
     assert not w.radio.ready and not w.start.isEnabled()
     previous = w.journal.folder
-    assert w.link.text() == "Link lost"
+    assert w.link.text() == "Link lost" and w.runway.robot is None
     w.connect_button.click()
     assert w.link.text() == "Disconnected"
     w.connect_button.click()
     wait(lambda: w.start.isEnabled())
+    wait(lambda: w.runway.robot == (40.0, -83.0, 180.0))
     assert w.journal.folder != previous and not w.station.session
     assert not any(button.isEnabled() for button in (w.submit, w.scan, w.approve, w.abort))
     print(

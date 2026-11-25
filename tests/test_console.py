@@ -119,7 +119,23 @@ def test_session_controls_and_reported_queue(window, monkeypatch):
         field.setText(value)
     w.submit.click()
     target = sent[-1][1].mission_id
+    w.radio.event("ack", topic=5, wire_id=1)
+    w.radio.event("nack", topic=7, wire_id=1)
+    w.tick()
+    assert "Radio ACK" not in w.timeline.toPlainText()
+    w.radio.event("ack", topic=7, wire_id=1)
+    w.radio.event("ack", topic=7, wire_id=1)
     receive(target, ["onboard-2"])
+    assert w.timeline.toPlainText().count("Radio ACK") == 1
+    assert "UGV accepted" in w.timeline.toPlainText() and "Active" in w.timeline.toPlainText()
+    w.tasks.selectRow(1)
+    assert (
+        "UGV accepted" in w.timeline.toPlainText() and "Radio ACK" not in w.timeline.toPlainText()
+    )
+    receive("onboard-2", [target])
+    assert w.tasks.item(w.tasks.currentRow(), 0).text() == "onboard-2"
+    receive(target, ["onboard-2"])
+    assert w.timeline.toPlainText().count("Active") == 1
     assert w.runway.targets == {target: (40.2, -83.0)} and w.runway.active == target
     assert w.tasks.item(1, 0).text() == "onboard-2" and w.tasks.item(1, 1).text() == "Queue 1"
     w.locate_row(w.tasks.item(1, 0))
@@ -157,7 +173,16 @@ def test_review_follows_current_evidence_and_keeps_original_resolution(
     c = w.codec
     session = w.station.session
     status = c.types["SessionStatus"](
-        c.stamp(), session, "working", "fod-1", [], False, 0, 0, "OK_TO_MOVE_FORWARD", ""
+        c.stamp(),
+        session,
+        "working",
+        "fod-1",
+        [],
+        False,
+        0,
+        0,
+        "OK_TO_MOVE_FORWARD",
+        "",
     )
     w.radio.receive(8, c.encode(status))
     image = QImage(320, 240, QImage.Format.Format_RGB32)
@@ -169,7 +194,9 @@ def test_review_follows_current_evidence_and_keeps_original_resolution(
     def receive(token, kind, data):
         stamp = c.stamp()
         preview = c.store.types["sensor_msgs/msg/CompressedImage"](
-            c.types["Header"](stamp, "optical"), "jpeg", np.frombuffer(data, dtype=np.uint8)
+            c.types["Header"](stamp, "optical"),
+            "jpeg",
+            np.frombuffer(data, dtype=np.uint8),
         )
         msg = c.types["Evidence"](
             stamp,
@@ -204,3 +231,74 @@ def test_review_follows_current_evidence_and_keeps_original_resolution(
     assert w.approve.isEnabled() and not w.retry.isEnabled()
     w.approve.click()
     assert not w.approve.isEnabled() and w.station.decisions == {"cycle"}
+
+
+def test_location_marker_and_freshness(window, monkeypatch):
+    from types import SimpleNamespace
+
+    import location
+
+    now = time.time_ns()
+    clock = [now, time.monotonic_ns()]
+    monkeypatch.setattr(
+        location,
+        "time",
+        SimpleNamespace(time_ns=lambda: clock[0], monotonic_ns=lambda: clock[1]),
+    )
+    w = window
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    w.port.setCurrentText("fixture")
+    w.connect_button.click()
+    w.radio.ready = True
+
+    def emit(ts, lat=0, lon=0, hdg=0):
+        utc = w.codec.types["Time"](*divmod(ts, 10**9))
+        msg = w.codec.types["RobotLocation"](utc, lat, lon, hdg)
+        w.radio.receive(20, w.codec.encode(msg))
+        w.tick()
+
+    for ts in (now - 10**9, now + 201_000_000):
+        emit(ts)
+        assert w.runway.robot is None
+    emit(now)
+    assert w.runway.robot == (0, 0, 0) and w.runway.center == (0, 0)
+    assert w.locate.isEnabled() and w.runway.preview_location is None
+    w.runway.preview(40, -83)
+    clock[0] += 10**9
+    for delta, lat, lon, h in [
+        (0, 1, 3, 10),
+        (10**9, 900000001, 0, 0),
+        (10**9, 0, 1800000001, 0),
+        (10**9, 0, 0, 36000),
+    ]:
+        emit(now + delta, lat, lon, h)
+        assert w.runway.robot == (0, 0, 0)
+    emit(clock[0], -10000000, 1799999999, 65535)
+    assert w.runway.robot == (-1, 179.9999999, None)
+    assert w.runway.center == (40, -83) and "unavailable" in w.robot_caption.text()
+    w.locate.click()
+    assert w.runway.center == w.runway.robot[:2]
+    clock[1] += 3_100_000_000
+    w.tick()
+    assert w.runway.robot is None and not w.locate.isEnabled() and "stale" in w.robot_caption.text()
+    clock[0] += 4_000_000_000
+    emit(clock[0], 899999999, 0, 35999)
+    assert w.runway.robot is None and "89.9999999" in w.robot_caption.text()
+    w.disconnect()
+    assert w.runway.robot is None
+
+
+def test_copy_diagnostics_without_radio(window):
+    window.port.setCurrentText("COM14")
+    window.copy_info.click()
+    text = QApplication.clipboard().text()
+    for value in (
+        window.build,
+        "Wire map v4",
+        "Port: COM14",
+        "Disconnected",
+        "no connection yet",
+    ):
+        assert value in text
+    assert window.radio is None

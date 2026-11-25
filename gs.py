@@ -2,6 +2,7 @@
 
 import math
 import queue
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,10 +36,38 @@ from PySide6.QtWidgets import (
 from serial.tools import list_ports
 
 from appearance import field_theme
+from location import LocationTrack
 from radio import Radio
 from runway_map import RunwayMap
 from station import Journal, Station
-from wire import Codec
+from wire import WIRE_MAP_VERSION, Codec
+
+
+def build_id():
+    root = Path(__file__).resolve().parent
+    if getattr(sys, "frozen", False):
+        stamp = root / "BUILD_ID"
+        return stamp.read_text(encoding="utf-8").strip() if stamp.is_file() else "unknown"
+    if (root / ".git").exists():
+        try:
+            return subprocess.check_output(
+                [
+                    "git",
+                    "describe",
+                    "--always",
+                    "--exclude",
+                    "*",
+                    "--dirty",
+                    "--abbrev=12",
+                ],
+                cwd=root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return "source"
 
 
 def label(text, name=""):
@@ -94,7 +123,9 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__()
         field_theme(QApplication.instance())
+        self.build = build_id()
         self.codec = Codec()
+        self.track = LocationTrack()
         self.radio = self.station = self.journal = None
         self.log_folder = self.last_rx = self.presentation = self.shown = None
         self.queue_rows = self.link_state = self.last_event = None
@@ -157,6 +188,8 @@ class Window(QMainWindow):
         foot.addWidget(self.feedback, 1)
         self.last_update = label("", "muted")
         foot.addWidget(self.last_update)
+        foot.addWidget(label(f"Build {self.build}   ·   Wire v{WIRE_MAP_VERSION}", "muted"))
+        self.copy_info = self.button(foot, "Copy diagnostics", self.copy_diagnostics)
         shell.addWidget(footer)
         self.ports()
         self.timer = QTimer(self)
@@ -172,6 +205,7 @@ class Window(QMainWindow):
         bar.addWidget(label("Mission map", "heading"))
         bar.addStretch()
         self.runway = RunwayMap()
+        self.locate = self.button(bar, "Locate UGV", self.locate_robot)
         self.zoom_out = self.button(bar, "−", lambda: self.runway.change_zoom(-1))
         self.zoom_in = self.button(bar, "+", lambda: self.runway.change_zoom(1))
         for button, name in [(self.zoom_out, "Zoom out"), (self.zoom_in, "Zoom in")]:
@@ -181,6 +215,8 @@ class Window(QMainWindow):
         pane.addWidget(self.runway, 1)
         self.map_caption = label("WGS84   ·   No location selected", "muted")
         pane.addWidget(self.map_caption)
+        self.robot_caption = label("", "muted")
+        pane.addWidget(self.robot_caption)
         pane = card(column)
         pane.addWidget(label("Send a FOD location", "heading"))
         fields = QHBoxLayout()
@@ -226,7 +262,9 @@ class Window(QMainWindow):
             lambda: self.confirm("scan_complete", "Finish scanning and drain the queue?"),
         )
         self.abort = self.button(
-            row, "Abort to base", lambda: self.confirm("abort", "Request abort and return to base?")
+            row,
+            "Abort to base",
+            lambda: self.confirm("abort", "Request abort and return to base?"),
         )
         self.abort.setObjectName("abort")
 
@@ -256,6 +294,14 @@ class Window(QMainWindow):
         self.empty_targets.setWordWrap(True)
         self.empty_targets.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pane.addWidget(self.empty_targets, 1)
+        self.timeline = QPlainTextEdit()
+        self.timeline.setReadOnly(True)
+        self.timeline.setAccessibleName("Selected FOD timeline")
+        self.timeline.setMaximumHeight(108)
+        self.timeline.setPlaceholderText("Select a FOD to see its timeline.")
+        pane.addWidget(self.timeline)
+        self.tasks.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tasks.currentItemChanged.connect(self.update_timeline)
         self.review_page = QWidget()
         self.tabs.addTab(self.review_page, "Review")
         review = QVBoxLayout(self.review_page)
@@ -316,6 +362,26 @@ class Window(QMainWindow):
         close.rejected.connect(dialog.reject)
         layout.addWidget(close)
         dialog.exec()
+
+    def copy_diagnostics(self):
+        lines = [
+            f"RavenStrike GS build {self.build}",
+            f"Wire map v{WIRE_MAP_VERSION}",
+            f"Port: {self.port.currentText().strip() or 'none selected'}",
+            f"Link: {self.link.text()}",
+            f"Log folder: {self.log_folder or 'no connection yet'}",
+        ]
+        QApplication.clipboard().setText("\n".join(lines))
+        self.feedback.setText("Diagnostics copied.")
+
+    def update_timeline(self):
+        item = self.tasks.item(self.tasks.currentRow(), 0)
+        entries = self.station.timeline.get(item.text(), []) if self.station and item else []
+        text = "\n".join(entries)
+        if self.timeline.toPlainText() != text:
+            self.timeline.setPlainText(text)
+            scroll = self.timeline.verticalScrollBar()
+            scroll.setValue(scroll.maximum())
 
     def open_log_folder(self):
         if self.log_folder and not QDesktopServices.openUrl(
@@ -384,11 +450,12 @@ class Window(QMainWindow):
                 )
             )
         self.journal = Journal(root / "logs")
-        self.journal.log("connect", port)
+        self.journal.log("connect", port, build=self.build, wire_map=WIRE_MAP_VERSION)
         self.log_folder = self.journal.folder
         self.event_line("Log directory: " + str(self.log_folder))
         self.radio = Radio(port, self.codec)
         self.station = Station(self.codec, self.radio, self.journal)
+        self.track = LocationTrack()
         self.radio.start()
         self.last_rx = None
         self.connect_button.setText("Disconnect")
@@ -467,6 +534,33 @@ class Window(QMainWindow):
         self.event_line("Sent " + decision + "; awaiting UGV report")
         self.tick()
 
+    def locate_robot(self):
+        if self.runway.robot:
+            self.runway.center = self.runway.robot[:2]
+            self.runway.failed.clear()
+            self.runway.update()
+
+    def update_location(self, ready):
+        pose = self.track.current() if ready else None
+        mappable = pose if pose and abs(pose[0]) <= 85.0511 else None
+        if self.runway.robot != mappable or (mappable and self.runway.center is None):
+            self.runway.robot = mappable
+            if mappable and self.runway.center is None:
+                self.locate_robot()
+            self.runway.update()
+        self.locate.setEnabled(bool(mappable))
+        if pose:
+            lat, lon, bearing = pose
+            course = "heading unavailable" if bearing is None else f"{bearing:.1f}° true"
+            caption = f"UGV   {lat:.7f}°, {lon:.7f}°   ·   {course}"
+        elif ready and self.track.position:
+            caption = "UGV location stale"
+        elif ready:
+            caption = "Waiting for a fresh UGV location"
+        else:
+            caption = "UGV location unavailable"
+        self.robot_caption.setText(caption)
+
     def drain(self):
         for _ in range(2048):
             try:
@@ -477,6 +571,17 @@ class Window(QMainWindow):
                 topic = data["topic"]
                 try:
                     msg = self.codec.decode(data["payload"], self.radio.engine.topics[topic].type)
+                    if topic == 20:
+                        if self.radio.ready and self.track.accept(msg):
+                            self.last_rx = time.monotonic()
+                            self.journal.log(
+                                "location",
+                                "UGV position",
+                                received=when,
+                                source_ns=self.track.stamp,
+                                pose=self.track.position,
+                            )
+                        continue
                     self.station.receive(topic, msg, when)
                     self.last_rx = time.monotonic()
                     parts = [
@@ -492,6 +597,8 @@ class Window(QMainWindow):
             else:
                 detail = data.get("detail", str(data))
                 self.journal.log(event, detail, received=when, fields=data)
+                if event == "ack":
+                    self.station.task_ack(data["topic"], data["wire_id"], when)
                 if event not in ("ack", "nack"):
                     self.event_line(event + " " + detail)
 
@@ -518,6 +625,7 @@ class Window(QMainWindow):
         if self.radio:
             self.radio.ui_seen = time.monotonic()
         ready = bool(self.radio and self.radio.ready)
+        self.update_location(ready)
         st = self.station
         self.port.setEnabled(self.radio is None)
         self.refresh.setEnabled(self.radio is None)
@@ -554,7 +662,13 @@ class Window(QMainWindow):
             and (
                 not st.session
                 or st.state
-                in ("completed", "canceled", "halted", "rejected", "awaiting acceptance")
+                in (
+                    "completed",
+                    "canceled",
+                    "halted",
+                    "rejected",
+                    "awaiting acceptance",
+                )
             )
         )
         self.abort.setEnabled(bool(ready and st.operating))
@@ -639,7 +753,12 @@ class Window(QMainWindow):
     def update_targets(self, st, active):
         queued = st.queue if st else []
         reports = st.targets if st else {}
-        names = dict.fromkeys(([active] if active else []) + queued + list(reports))
+        names = dict.fromkeys(
+            ([active] if active else [])
+            + queued
+            + list(reports)
+            + (list(st.timeline) if st else [])
+        )
         positions = {name: i for i, name in enumerate(queued, 1)}
         rows = []
         for name in names:
@@ -656,7 +775,11 @@ class Window(QMainWindow):
             caption += f"   ·   {len(queued)} queued"
         self.queue_caption.setText(caption)
         if rows == self.queue_rows:
+            self.update_timeline()
             return
+        previous = self.tasks.item(self.tasks.currentRow(), 0)
+        selected = previous.text() if previous else active
+        self.tasks.blockSignals(True)
         self.queue_rows = rows
         self.tasks.setVisible(bool(rows))
         self.empty_targets.setVisible(not rows)
@@ -666,6 +789,10 @@ class Window(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 self.tasks.setItem(i, j, item)
+        if rows:
+            self.tasks.selectRow(next((i for i, row in enumerate(rows) if row[0] == selected), 0))
+        self.tasks.blockSignals(False)
+        self.update_timeline()
 
     def closeEvent(self, event):
         if (
@@ -688,10 +815,18 @@ if __name__ == "__main__":
     if "--self-test" in sys.argv:
         # Exercise the packaged GUI, wire map and dynamically loaded CDR store offline.
         app.processEvents()
+        if getattr(sys, "frozen", False) and window.build == "unknown":
+            raise RuntimeError("Packaged build ID is missing")
         radio = Radio("", window.codec)
         task = window.codec.gps("offline", "fod-1", "UGV-1", 1.0, 2.0, 0.0)
         if window.codec.decode(window.codec.encode(task), task.__msgtype__) != task:
             raise RuntimeError("Packaged GPS task failed the CDR round trip")
+        location = window.codec.types["RobotLocation"](window.codec.stamp(), 0, 0, 65535)
+        if (
+            window.codec.decode(window.codec.encode(location), radio.engine.topics[20].type)
+            != location
+        ):
+            raise RuntimeError("Packaged robot location failed the CDR round trip")
         if window.submit.isEnabled() or radio.ready:
             raise RuntimeError("Disconnected station accepted mission input")
         window.close()

@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace as N
 
 import pytest
@@ -92,3 +93,27 @@ def test_queue_controls(station):
     status(st, "", "complete", 10, "completed")
     status(st, "old", "OK_TO_MOVE_FORWARD", 11)
     assert st.state == "completed" and st.review_token() is None
+
+
+def test_outcome_can_arrive_before_radio_ack(station):
+    st = station
+    status(st, "", "accepted", state="standby")
+    mission = st.add(40, -83, 0)
+    report_type = st.codec.store.types["ravenstrike_interfaces/msg/VerificationReport"]
+
+    def report(sec, outcome):
+        msg = report_type(
+            st.codec.types["Time"](sec, 0), mission, st.callsign, outcome, [], "", "task rejected"
+        )
+        st.receive(2, msg)
+
+    report(4, "blocked")
+    report(3, "in_progress")
+    report(4, "blocked")
+    st.task_ack(7, 123, time.time_ns())
+    st.task_ack(7, 123, time.time_ns())
+    stages = [line.split(" UTC   ", 1)[1] for line in st.timeline[mission]]
+    assert stages == ["Sent to radio queue", "Blocked · task rejected", "Radio ACK"]
+    status(st, "", "complete", 6, "completed")
+    st.start("UGV-1", "next", (0.0, 0.0, 0.0))
+    assert not st.timeline and not st.pending_tasks

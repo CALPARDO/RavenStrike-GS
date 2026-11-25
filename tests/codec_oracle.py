@@ -23,10 +23,11 @@ else:
     from ravenstrike_interfaces.msg import VerificationReport
     from rclpy.serialization import deserialize_message, serialize_message
     from rosidl_runtime_py.utilities import get_message
-    from ugv_mission_interfaces.msg import Evidence, SessionStatus
+    from ugv_mission_interfaces.msg import Evidence, RobotLocation, SessionStatus
 
     if sys.argv[1] == "generate":
         records = [
+            RobotLocation(latitude_e7=-123456789, longitude_e7=1799999999, heading_cdeg=65535),
             SessionStatus(
                 session_id="odd-length", state="working", queued_mission_ids=["a", "FOD-3"]
             ),

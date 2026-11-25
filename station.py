@@ -63,6 +63,22 @@ class Station:
         self.targets = {}
         self.report_times = {}
         self.final_reports = set()
+        self.timeline = {}
+        self.pending_tasks = {}
+        self.accepted_tasks = set()
+
+    def record(self, mission, text, when=None):
+        utc = datetime.fromtimestamp((when or time.time_ns()) / 1e9, UTC).strftime("%H:%M:%S")
+        self.timeline.setdefault(mission, []).append(f"{utc} UTC   {text}")
+
+    def task_ack(self, topic, wire_id, when):
+        if topic == 7 and (mission := self.pending_tasks.pop(wire_id, None)):
+            self.record(mission, "Radio ACK", when)
+
+    def accepted(self, mission, when):
+        if mission not in self.accepted_tasks and mission not in self.final_reports:
+            self.accepted_tasks.add(mission)
+            self.record(mission, "UGV accepted", when)
 
     @property
     def operating(self):
@@ -73,8 +89,15 @@ class Station:
         wire_id = self.radio.send(topic, msg)
         self.journal.log("sent", detail, wire_id=wire_id, topic=topic, message=contents(msg))
 
+        return wire_id
+
     def start(self, callsign, area, home):
-        if self.session and self.state not in ("completed", "canceled", "halted", "rejected"):
+        if self.session and self.state not in (
+            "completed",
+            "canceled",
+            "halted",
+            "rejected",
+        ):
             raise ValueError("A session is already pending or active.")
         if not all(0 < len(s.encode()) <= 128 for s in (callsign, area)):
             raise ValueError("Enter a callsign and area (up to 128 bytes each).")
@@ -114,7 +137,9 @@ class Station:
             raise ValueError("Start an accepted, open scanning session first.")
         mission = "fod-" + uuid4().hex[:12]
         msg = self.codec.gps(self.session, mission, self.callsign, lat, lon, alt)
-        self.send(7, msg, "Submitted " + mission)
+        wire_id = self.send(7, msg, "Submitted " + mission)
+        self.pending_tasks[wire_id] = mission
+        self.record(mission, "Sent to radio queue")
         self.targets[mission] = "awaiting UGV"
         return mission
 
@@ -137,6 +162,10 @@ class Station:
         )
         self.send(6, msg, decision + " " + self.active + " evidence " + token)
         self.decisions.add(token)
+        action = (
+            "retry" if decision == "retry" else "continue" if kind != "after" else "approve removal"
+        )
+        self.record(self.active, f"Operator requested {action}")
 
     def receive(self, topic, msg, received=None):
         detail = getattr(msg, "notes", "") or getattr(msg, "kind", "")
@@ -154,27 +183,53 @@ class Station:
         stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
         if topic == 2:
             if msg.assigned_callsign == self.callsign and (
-                msg.mission_id in self.targets or msg.mission_id == self.active
+                msg.mission_id in self.targets
+                or msg.mission_id in self.accepted_tasks
+                or msg.mission_id == self.active
             ):
                 if msg.mission_id in self.final_reports or stamp < self.report_times.get(
                     msg.mission_id, -1
                 ):
                     return
                 self.report_times[msg.mission_id] = stamp
+                if msg.status == "in_progress":
+                    self.accepted(msg.mission_id, received)
                 if msg.status in ("completed", "aborted", "blocked"):
+                    self.record(
+                        msg.mission_id,
+                        f"{msg.status.capitalize()} · {msg.notes}".rstrip(" ·"),
+                        received,
+                    )
                     self.final_reports.add(msg.mission_id)
                 self.targets[msg.mission_id] = (msg.status + " " + msg.notes).strip()
             return
         if not self.session or msg.session_id != self.session:
             return
         if topic == 8:
-            if stamp < self.last_status or self.state in ("completed", "halted", "canceled"):
+            if stamp < self.last_status or self.state in (
+                "completed",
+                "halted",
+                "canceled",
+            ):
                 return
+            previous_active, previous_review = self.active, self.review
             self.last_status = stamp
-            self.state, self.note, self.active = msg.state, msg.notes, msg.active_mission_id
+            self.state, self.note, self.active = (
+                msg.state,
+                msg.notes,
+                msg.active_mission_id,
+            )
             self.queue = list(msg.queued_mission_ids)
             self.scanned = msg.scanning_complete
             self.review = self.note == "OK_TO_MOVE_FORWARD"
+            for mission in self.queue:
+                self.accepted(mission, received)
+            if self.active and self.active not in self.final_reports:
+                self.accepted(self.active, received)
+                if previous_active != self.active:
+                    self.record(self.active, "Active", received)
+                if self.review and (not previous_review or self.active != previous_active):
+                    self.record(self.active, "Awaiting operator review", received)
         elif topic == 19:
             token, kind = msg.evidence_id, msg.kind
             if (

@@ -5,7 +5,7 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QStandardPaths, Qt, QUrl
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkDiskCache, QNetworkRequest
 from PySide6.QtWidgets import QWidget
 
@@ -14,7 +14,7 @@ class RunwayMap(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(195)
-        self.center = None
+        self.center = self.robot = None
         self.preview_location = self.drag = None
         self.zoom = 18
         self.targets = {}
@@ -160,6 +160,23 @@ class RunwayMap(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         if self.preview_location:
             p.drawEllipse(screen_point(self.preview_location), 9, 9)
+        if self.robot:
+            pt = screen_point(self.robot[:2])
+            p.save()
+            p.translate(pt)
+            p.setPen(QPen(Qt.GlobalColor.white, 2))
+            p.setBrush(QColor("#253b72"))
+            bearing = self.robot[2]
+            if bearing is None:
+                p.drawEllipse(QPointF(), 7, 7)
+            else:
+                p.rotate(bearing)
+                p.drawPolygon(
+                    QPolygonF([QPointF(0, -12), QPointF(8, 8), QPointF(0, 5), QPointF(-8, 8)])
+                )
+            p.restore()
+            p.setPen(QColor("#253b72"))
+            p.drawText(pt + QPointF(11, -6), "UGV")
         caption = "© OpenStreetMap contributors"
         if self.failed:
             caption = "Map tiles unavailable   ·   " + caption
