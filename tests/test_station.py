@@ -117,3 +117,26 @@ def test_outcome_can_arrive_before_radio_ack(station):
     status(st, "", "complete", 6, "completed")
     st.start("UGV-1", "next", (0.0, 0.0, 0.0))
     assert not st.timeline and not st.pending_tasks
+
+
+def test_selection_report_precedes_active_snapshot(station):
+    st = station
+    status(st, "", "ready", state="standby")
+    mission = st.add(40, -83, 0)
+    make_report = st.codec.types["VerificationReport"]
+    msg = make_report(
+        st.codec.types["Time"](3, 0),
+        mission,
+        st.callsign,
+        "in_progress",
+        [],
+        "",
+        "nearest target selected",
+    )
+    st.receive(2, msg)
+    assert any(line.endswith("   Active") for line in st.timeline[mission])
+    status(st, "", "SELECT_FOD_TARGET", sec=2)
+    status(st, mission, "DETECTION_MODE", sec=5)
+    assert sum(line.endswith("   Active") for line in st.timeline[mission]) == 1
+    status(st, "return:" + st.session, "queue empty", sec=6, state="returning")
+    assert set(st.timeline) == {mission}

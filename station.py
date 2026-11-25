@@ -66,6 +66,8 @@ class Station:
         self.timeline = {}
         self.pending_tasks = {}
         self.accepted_tasks = set()
+        self.selected_fod = ""
+        self.selection_stamp = -1
 
     def record(self, mission, text, when=None):
         utc = datetime.fromtimestamp((when or time.time_ns()) / 1e9, UTC).strftime("%H:%M:%S")
@@ -79,6 +81,16 @@ class Station:
         if mission not in self.accepted_tasks and mission not in self.final_reports:
             self.accepted_tasks.add(mission)
             self.record(mission, "UGV accepted", when)
+
+    def observe_selection(self, mission, stamp, received):
+        # Progress reports and session snapshots travel on separate radio topics.
+        if stamp < self.selection_stamp:
+            return
+        self.selection_stamp = stamp
+        if mission != self.selected_fod:
+            self.selected_fod = mission
+            if mission and mission not in self.final_reports:
+                self.record(mission, "Active", received)
 
     @property
     def operating(self):
@@ -194,6 +206,8 @@ class Station:
                 self.report_times[msg.mission_id] = stamp
                 if msg.status == "in_progress":
                     self.accepted(msg.mission_id, received)
+                    if msg.notes in ("nearest target selected", "closer onboard target selected"):
+                        self.observe_selection(msg.mission_id, stamp, received)
                 if msg.status in ("completed", "aborted", "blocked"):
                     self.record(
                         msg.mission_id,
@@ -224,12 +238,17 @@ class Station:
             self.review = self.note == "OK_TO_MOVE_FORWARD"
             for mission in self.queue:
                 self.accepted(mission, received)
-            if self.active and self.active not in self.final_reports:
-                self.accepted(self.active, received)
-                if previous_active != self.active:
-                    self.record(self.active, "Active", received)
-                if self.review and (not previous_review or self.active != previous_active):
-                    self.record(self.active, "Awaiting operator review", received)
+            active_fod = self.active if self.state == "working" else ""
+            if active_fod:
+                self.accepted(active_fod, received)
+            self.observe_selection(active_fod, stamp, received)
+            if (
+                active_fod
+                and active_fod not in self.final_reports
+                and self.review
+                and (not previous_review or self.active != previous_active)
+            ):
+                self.record(active_fod, "Awaiting operator review", received)
         elif topic == 19:
             token, kind = msg.evidence_id, msg.kind
             if (
