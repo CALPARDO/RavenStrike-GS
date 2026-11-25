@@ -1,0 +1,206 @@
+"""State the GS has observed, never a local mission FSM."""
+
+import hashlib
+import json
+import time
+from dataclasses import fields, is_dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+
+def contents(value):
+    if is_dataclass(value):
+        return {
+            f.name: contents(getattr(value, f.name))
+            for f in fields(value)
+            if f.name != "__msgtype__"
+        }
+    if hasattr(value, "tobytes"):
+        return {"bytes": value.nbytes}
+    return value
+
+
+class Journal:
+    def __init__(self, root):
+        self.start = time.monotonic()
+        self.folder = Path(root) / (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid4().hex[:8])
+        (self.folder / "evidence").mkdir(parents=True)
+        self.console = (self.folder / "console.log").open("x", buffering=1)
+        self.events = (self.folder / "events.jsonl").open("x", buffering=1)
+
+    def log(self, event, detail, *, received=None, **data):
+        when = datetime.fromtimestamp((received or time.time_ns()) / 1e9, UTC).isoformat(
+            timespec="milliseconds"
+        )
+        entry = dict(
+            utc=when,
+            elapsed_s=round(time.monotonic() - self.start, 3),
+            event=event,
+            detail=detail,
+            **data,
+        )
+        self.events.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self.console.write(f"{when} {event}: {detail}\n")
+
+    def close(self):
+        self.events.close()
+        self.console.close()
+
+
+class Station:
+    def __init__(self, codec, radio, journal):
+        self.codec, self.radio, self.journal = codec, radio, journal
+        self.session = self.active = self.state = self.note = ""
+        self.callsign = self.area = ""
+        self.home = ()
+        self.queue = []
+        self.scanned = self.scanning_requested = self.abort_requested = self.review = False
+        self.last_status = -1
+        self.records = {}
+        self.latest = {}
+        self.decisions = set()
+        self.targets = {}
+        self.report_times = {}
+        self.final_reports = set()
+
+    @property
+    def operating(self):
+        return self.state in ("standby", "working", "returning") and not self.abort_requested
+
+    def send(self, topic, msg, detail):
+        self.journal.log("operator_request", detail, topic=topic, message=contents(msg))
+        wire_id = self.radio.send(topic, msg)
+        self.journal.log("sent", detail, wire_id=wire_id, topic=topic, message=contents(msg))
+
+    def start(self, callsign, area, home):
+        if self.session and self.state not in ("completed", "canceled", "halted", "rejected"):
+            raise ValueError("A session is already pending or active.")
+        if not all(0 < len(s.encode()) <= 128 for s in (callsign, area)):
+            raise ValueError("Enter a callsign and area (up to 128 bytes each).")
+        sid = uuid4().hex
+        msg = self.codec.control(sid, callsign, area, home, "start")
+        self.send(5, msg, "Start supervised session " + sid)
+        self.__init__(self.codec, self.radio, self.journal)
+        self.session, self.area, self.callsign, self.home = sid, area, callsign, home
+        self.state = "awaiting acceptance"
+
+    def retry_start(self):
+        if self.state != "awaiting acceptance":
+            raise ValueError("Session is no longer pending.")
+        self.send(
+            5,
+            self.codec.control(self.session, self.callsign, self.area, self.home, "start"),
+            "Operator retried start for " + self.session,
+        )
+
+    def command(self, command):
+        if not self.operating or command not in ("scan_complete", "abort"):
+            raise ValueError("Session cannot accept this command.")
+        if command == "scan_complete" and (self.scanned or self.scanning_requested):
+            raise ValueError("Scanning completion already sent.")
+        self.send(
+            5,
+            self.codec.control(self.session, self.callsign, self.area, self.home, command),
+            command,
+        )
+        if command == "scan_complete":
+            self.scanning_requested = True
+        else:
+            self.abort_requested = True
+
+    def add(self, lat, lon, alt):
+        if not self.operating or self.scanned or self.scanning_requested:
+            raise ValueError("Start an accepted, open scanning session first.")
+        mission = "fod-" + uuid4().hex[:12]
+        msg = self.codec.gps(self.session, mission, self.callsign, lat, lon, alt)
+        self.send(7, msg, "Submitted " + mission)
+        self.targets[mission] = "awaiting UGV"
+        return mission
+
+    def review_token(self):
+        token = self.latest.get((self.active, "review"))
+        if self.operating and self.review and token and token not in self.decisions:
+            return token
+        return None
+
+    def decide(self, token, decision):
+        if not token or token != self.review_token():
+            raise ValueError("The displayed review is no longer current.")
+        kind = self.records[token][0]
+        if decision not in ("approve", "retry") or (
+            kind == "cycle_complete" and decision == "retry"
+        ):
+            raise ValueError("This review does not allow that decision.")
+        msg = self.codec.types["OperatorDecision"](
+            self.codec.stamp(), self.session, self.active, token, decision
+        )
+        self.send(6, msg, decision + " " + self.active + " evidence " + token)
+        self.decisions.add(token)
+
+    def receive(self, topic, msg, received=None):
+        detail = getattr(msg, "notes", "") or getattr(msg, "kind", "")
+        summary = " ".join(
+            str(x)
+            for x in (
+                getattr(msg, "mission_id", ""),
+                getattr(msg, "state", ""),
+                getattr(msg, "status", ""),
+                detail,
+            )
+            if x
+        )
+        self.journal.log("received", summary, received=received, topic=topic, message=contents(msg))
+        stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
+        if topic == 2:
+            if msg.assigned_callsign == self.callsign and (
+                msg.mission_id in self.targets or msg.mission_id == self.active
+            ):
+                if msg.mission_id in self.final_reports or stamp < self.report_times.get(
+                    msg.mission_id, -1
+                ):
+                    return
+                self.report_times[msg.mission_id] = stamp
+                if msg.status in ("completed", "aborted", "blocked"):
+                    self.final_reports.add(msg.mission_id)
+                self.targets[msg.mission_id] = (msg.status + " " + msg.notes).strip()
+            return
+        if not self.session or msg.session_id != self.session:
+            return
+        if topic == 8:
+            if stamp < self.last_status or self.state in ("completed", "halted", "canceled"):
+                return
+            self.last_status = stamp
+            self.state, self.note, self.active = msg.state, msg.notes, msg.active_mission_id
+            self.queue = list(msg.queued_mission_ids)
+            self.scanned = msg.scanning_complete
+            self.review = self.note == "OK_TO_MOVE_FORWARD"
+        elif topic == 19:
+            token, kind = msg.evidence_id, msg.kind
+            if (
+                not token
+                or token in self.records
+                or kind not in ("before", "after", "not_found", "cycle_complete")
+            ):
+                return
+            data = bytes(msg.preview.data)
+            path = None
+            if kind == "cycle_complete":
+                if data:
+                    raise ValueError("Unexpected image on cycle_complete.")
+            else:
+                digest = hashlib.sha256(data).hexdigest()
+                if (
+                    not data
+                    or len(data) > 12288
+                    or digest != msg.preview_sha256
+                    or msg.preview.format.lower() != "jpeg"
+                ):
+                    raise ValueError("Invalid JPEG preview or checksum.")
+                path = self.journal.folder / "evidence" / (digest + ".jpg")
+                path.write_bytes(data)
+            self.records[token] = (kind, path, stamp)
+            key = (msg.mission_id, "before" if kind == "before" else "review")
+            prior = self.latest.get(key)
+            if prior is None or self.records[prior][2] < stamp:
+                self.latest[key] = token

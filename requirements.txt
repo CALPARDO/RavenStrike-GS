@@ -1,0 +1,3 @@
+PySide6-Essentials==6.12.0
+rosbags==0.11.0
+rfd_bridge @ git+https://github.com/CALPARDO/rfd_bridge.git@d827d1accf79710353439a2e7763b14e7db4c48b

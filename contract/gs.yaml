@@ -1,0 +1,151 @@
+# Mission wire map v3; both endpoints need matching workflow interfaces.
+# Jetson header and USB bench pair. Match the serial settings on replacement modems.
+# Supply serial_port explicitly and review both endpoint settings.
+bridge_id: ravenstrike_gs
+diagnostics_topic: /rfd_bridge/diagnostics
+diagnostics_period_sec: 0.5
+serial:
+  port: /dev/serial/by-id/TBD-RFD900x-US
+  baud: 460800
+  rtscts: true
+  reconnect: true
+link:
+  bandwidth_limit_bps: 20000
+  mtu_payload: 256
+  max_message_size: 16384
+  max_queue_bytes: 65536
+  max_reassembly_messages: 16
+  reassembly_timeout_sec: 5.0
+  ack_timeout_sec: 1.0
+  max_retries: 3
+  max_reliable_pending: 32
+  hello_interval_sec: 0.2
+  link_timeout_sec: 1.0
+  refuse_on_config_mismatch: true
+topics:
+  tasks:
+    id: 1
+    ros_topic: /ravenstrike/radio/tx/tasks
+    remote_topic: /ravenstrike/radio/rx/tasks
+    type: ravenstrike_interfaces/msg/GroundTaskAssignment
+    direction: tx
+    priority: 1
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  reports:
+    id: 2
+    ros_topic: /ravenstrike/radio/tx/reports
+    remote_topic: /ravenstrike/radio/rx/reports
+    type: ravenstrike_interfaces/msg/VerificationReport
+    direction: rx
+    priority: 2
+    reliability: reliable
+    queue_depth: 16
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  heartbeat:
+    id: 3
+    ros_topic: /ravenstrike/radio/tx/heartbeat
+    remote_topic: /ravenstrike/radio/rx/heartbeat
+    type: builtin_interfaces/msg/Time
+    direction: tx
+    priority: 0
+    reliability: latest
+    queue_depth: 1
+    max_rate_hz: 10.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  cancel:
+    id: 4
+    ros_topic: /ravenstrike/radio/tx/cancel
+    remote_topic: /ravenstrike/radio/rx/cancel
+    type: std_msgs/msg/String
+    direction: tx
+    priority: 0
+    reliability: reliable
+    queue_depth: 4
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  session_control:
+    id: 5
+    ros_topic: /ravenstrike/radio/tx/session_control
+    remote_topic: /ravenstrike/radio/rx/session_control
+    type: ugv_mission_interfaces/msg/SessionControl
+    direction: tx
+    priority: 1
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  operator_decision:
+    id: 6
+    ros_topic: /ravenstrike/radio/tx/operator_decision
+    remote_topic: /ravenstrike/radio/rx/operator_decision
+    type: ugv_mission_interfaces/msg/OperatorDecision
+    direction: tx
+    priority: 1
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  gps_tasks:
+    id: 7
+    ros_topic: /ravenstrike/radio/tx/gps_tasks
+    remote_topic: /ravenstrike/radio/rx/gps_tasks
+    type: ugv_mission_interfaces/msg/GpsTask
+    direction: tx
+    priority: 1
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  session_status:
+    id: 8
+    ros_topic: /ravenstrike/radio/tx/session_status
+    remote_topic: /ravenstrike/radio/rx/session_status
+    type: ugv_mission_interfaces/msg/SessionStatus
+    direction: rx
+    priority: 2
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
+  evidence:
+    id: 19
+    ros_topic: /ravenstrike/radio/tx/evidence
+    remote_topic: /ravenstrike/radio/rx/evidence
+    type: ugv_mission_interfaces/msg/Evidence
+    direction: rx
+    priority: 2
+    reliability: reliable
+    queue_depth: 8
+    max_rate_hz: 0.0
+    qos:
+      reliability: reliable
+      durability: volatile
+      depth: 10
