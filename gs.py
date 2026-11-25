@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -154,7 +154,12 @@ class Window(QMainWindow):
         port = self.port.currentText().strip()
         if not port:
             raise ValueError("Select the USB radio serial port.")
-        self.journal = Journal(Path(__file__).resolve().parent / "logs")
+        root = Path(__file__).resolve().parent
+        if getattr(sys, "frozen", False):
+            root = Path(
+                QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+            )
+        self.journal = Journal(root / "logs")
         self.journal.log("connect", port)
         self.log.appendPlainText("Log directory: " + str(self.journal.folder))
         self.radio = Radio(port, self.codec)
@@ -381,4 +386,15 @@ if __name__ == "__main__":
     window = Window()
     window.resize(880, 680)
     window.show()
-    sys.exit(app.exec())
+    if "--self-test" in sys.argv:
+        # Exercise the packaged GUI, wire map and dynamically loaded CDR store offline.
+        app.processEvents()
+        radio = Radio("", window.codec)
+        task = window.codec.gps("offline", "fod-1", "UGV-1", 1.0, 2.0, 0.0)
+        if window.codec.decode(window.codec.encode(task), task.__msgtype__) != task:
+            raise RuntimeError("Packaged GPS task failed the CDR round trip")
+        if window.submit.isEnabled() or radio.ready:
+            raise RuntimeError("Disconnected station accepted mission input")
+        window.close()
+    else:
+        sys.exit(app.exec())

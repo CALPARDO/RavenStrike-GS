@@ -2,7 +2,13 @@
 
 A Python and Qt USB-radio console for one supervised Lynx session. The field app runs locally without ROS. The terminal demo remains in the UGV workspace.
 
-## Run on Linux
+## Download a desktop build
+
+Open [Desktop builds](https://github.com/CALPARDO/RavenStrike-GS/actions/workflows/desktop.yml), select a successful run, and download the artifact for your machine. Unpack the artifact and the archive inside it. On Ubuntu 24.04 (x64 or ARM64), run `./RavenStrike-GS/RavenStrike-GS`. On Windows x64, open `RavenStrike-GS.exe`. On Apple silicon, open `RavenStrike-GS.app`. Keep the extracted folder together. Windows and macOS builds are unsigned.
+
+Pushes to main and pull requests test and package all four platforms. Use **Run workflow** to rebuild a selected branch. Pushing a version tag such as `v0.1.0` publishes the tested archives and SHA-256 checksums on [Releases](https://github.com/CALPARDO/RavenStrike-GS/releases). Each runner tests the packaged window, loads the radio configuration and round-trips a GPS task without opening a serial port. USB radio checks run separately on the bench.
+
+## Run from source on Linux
 
 On the prepared Jetson, open a desktop terminal and run:
 
@@ -21,13 +27,13 @@ python3 -m venv .venv
 
 1. Plug in the GS USB radio. Select its port and click **Connect**. **Ready** requires a compatible peer and a heartbeat warm-up. One application owns each radio.
 2. Choose **Start session**. Enter the robot callsign, area ID and surveyed home pose in the robot's map frame (metres and heading in degrees). Confirm the UGV acknowledges the session. Both endpoint clocks need to be synchronized.
-3. Enter WGS84 latitude, longitude and ellipsoid altitude. **Preview on map** loads OpenStreetMap tiles using the laptop's internet. **Send FOD** sends one location. The current form uses hazard level 1 and map yaw 0 radians. The queue and active ID come from UGV status. The map labels the GS-submitted coordinates. A map outage leaves radio controls available.
+3. Enter WGS84 latitude, longitude and ellipsoid altitude. **Preview on map** loads OpenStreetMap tiles using the laptop's internet. **Send FOD** sends one location. The current form uses hazard level 1 and map yaw 0 radians. The queue and active ID come from UGV status. The map labels GS-submitted coordinates in blue and highlights the reported active target in orange when its coordinates are known. Wire map v3 carries no robot pose or Nav2 path. A map outage leaves radio controls available.
 4. Choose **Scanning complete** after sending the last task. For each review, match the active ID to the preview. Choose **Approve removal** or **Clean again** for an after-image. For a not-found image choose **Continue** or **Search again**. A cycle-complete token offers **Continue** and records removal as unverified. The UGV decides the outcome and any applicable timeouts.
 5. Wait for the UGV's terminal session status. **Abort to base** requests a mission abort through the FSM. Physical emergency stop remains a platform function.
 
 ## Logs and recovery
 
-Each connection creates a folder under `logs/`. `console.log` records radio and mission events in UTC. `events.jsonl` includes elapsed time, typed message fields, evidence IDs, operator requests, local send results, radio ACKs and retry counts. JPEGs are checked against the received SHA-256 and saved as `evidence/<preview_sha256>.jpg`. A transport ACK means the remote bridge received the bytes. Mission acceptance comes from a UGV report.
+Each connection creates a folder under `logs/` beside the source or, for packaged apps, in the user’s application data directory. The window prints the full path on connection. `console.log` records radio and mission events in UTC. `events.jsonl` includes elapsed time, typed message fields, evidence IDs, operator requests, local send results, radio ACKs and retry counts. JPEGs are checked against the received SHA-256 and saved as `evidence/<preview_sha256>.jpg`. A transport ACK means the remote bridge received the bytes. Mission acceptance comes from a UGV report.
 
 Loss of an established radio link locks the session and stops the GS heartbeat. Reconnecting requires an explicit disconnect/connect and creates a fresh transport. Reconcile the unfinished mission at the robot before starting another session. An unresponsive operator window also stops the heartbeat. A delayed or duplicate review message must not authorize a new decision.
 

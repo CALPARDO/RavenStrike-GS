@@ -26,8 +26,8 @@ class Journal:
         self.start = time.monotonic()
         self.folder = Path(root) / (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid4().hex[:8])
         (self.folder / "evidence").mkdir(parents=True)
-        self.console = (self.folder / "console.log").open("x", buffering=1)
-        self.events = (self.folder / "events.jsonl").open("x", buffering=1)
+        self.console = (self.folder / "console.log").open("x", buffering=1, encoding="utf-8")
+        self.events = (self.folder / "events.jsonl").open("x", buffering=1, encoding="utf-8")
 
     def log(self, event, detail, *, received=None, **data):
         when = datetime.fromtimestamp((received or time.time_ns()) / 1e9, UTC).isoformat(

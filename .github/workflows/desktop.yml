@@ -1,0 +1,103 @@
+name: Desktop builds
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, platform: linux-x64 }
+          - { runner: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { runner: windows-2025, platform: windows-x64 }
+          - { runner: macos-15, platform: macos-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest pyinstaller==6.22.3
+      - name: Test station behavior
+        run: python -m pytest -q tests/test_station.py
+      - name: Build desktop application
+        run: |
+          python -m PyInstaller --noconfirm --windowed --onedir --name RavenStrike-GS \
+            --add-data 'contract:contract' --hidden-import rosbags.typesys.stores.ros2_jazzy \
+            --hidden-import rosbags.serde.primitives --copy-metadata rosbags --copy-metadata rfd_bridge \
+            --exclude-module tkinter --exclude-module pytest gs.py
+      - name: Smoke-test packaged application
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess, sys
+          binary = {
+              'darwin': 'RavenStrike-GS.app/Contents/MacOS/RavenStrike-GS',
+              'win32': 'RavenStrike-GS/RavenStrike-GS.exe',
+              'linux': 'RavenStrike-GS/RavenStrike-GS',
+          }[sys.platform]
+          subprocess.run([Path('dist', binary).resolve(), '--self-test'], check=True, timeout=90)
+          PY
+      - name: Archive application
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cd dist
+          case "$RUNNER_OS" in
+            macOS) tar -czf "../RavenStrike-GS-$PLATFORM.tar.gz" RavenStrike-GS.app ;;
+            Linux) tar -czf "../RavenStrike-GS-$PLATFORM.tar.gz" RavenStrike-GS ;;
+            Windows) 7z a -tzip "../RavenStrike-GS-$PLATFORM.zip" RavenStrike-GS ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        with:
+          name: RavenStrike-GS-${{ matrix.platform }}
+          path: RavenStrike-GS-${{ matrix.platform }}.*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish tagged release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Publish packages and checksums
+        working-directory: packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum RavenStrike-GS-* > SHA256SUMS
+          gh release create "$TAG" --verify-tag --generate-notes RavenStrike-GS-* SHA256SUMS
