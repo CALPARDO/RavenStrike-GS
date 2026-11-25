@@ -1,4 +1,4 @@
-"""Small online street map. Only an explicit preview or target submission selects a site."""
+"""Online mission map with explicit site, target and vehicle controls."""
 
 import math
 from functools import partial
@@ -177,6 +177,21 @@ class RunwayMap(QWidget):
             p.restore()
             p.setPen(QColor("#253b72"))
             p.drawText(pt + QPointF(11, -6), "UGV")
+        # Ground distance represented by one Web Mercator screen pixel at the center.
+        metres_per_px = 40075016.686 * math.cos(math.radians(self.center[0])) / (256 * count)
+        ideal = max(1, metres_per_px * 72)
+        decade = 10 ** math.floor(math.log10(ideal))
+        metres = max(step * decade for step in (1, 2, 5) if step * decade <= ideal)
+        pixels = max(1, round(metres / metres_per_px))
+        distance = f"{metres / 1000:g} km" if metres >= 1000 else f"{metres:g} m"
+        box = QRect(7, self.height() - 36, pixels + 16, 30)
+        p.fillRect(box, QColor("#ffffff"))
+        p.setPen(QPen(QColor("#365851"), 2))
+        p.drawText(box.adjusted(0, 0, 0, -9), Qt.AlignmentFlag.AlignCenter, distance)
+        y = box.bottom() - 5
+        p.drawLine(15, y, 15 + pixels, y)
+        p.drawLine(15, y - 4, 15, y)
+        p.drawLine(15 + pixels, y - 4, 15 + pixels, y)
         caption = "© OpenStreetMap contributors"
         if self.failed:
             caption = "Map tiles unavailable   ·   " + caption

@@ -47,7 +47,7 @@ jobs:
         run: |
           git rev-parse --short=12 HEAD > BUILD_ID
           python -m PyInstaller --noconfirm --windowed --onedir --name RavenStrike-GS \
-            --add-data 'BUILD_ID:.' --add-data 'contract:contract' --hidden-import rosbags.typesys.stores.ros2_jazzy \
+            --add-data 'BUILD_ID:.' --add-data 'contract:contract' --add-data 'demo:demo' --hidden-import rosbags.typesys.stores.ros2_jazzy \
             --hidden-import rosbags.serde.primitives --copy-metadata rosbags --copy-metadata rfd_bridge \
             --exclude-module tkinter --exclude-module pytest gs.py
       - name: Smoke-test packaged application

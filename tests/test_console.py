@@ -333,3 +333,36 @@ def test_jetson_instruments_and_stale_app_controls(window, monkeypatch):
     assert not w.launch_app.isEnabled() and not w.stop_app.isEnabled()
     assert [widget.text() for widget in w.instruments] == ["—"] * 3
     w.disconnect()
+
+
+def test_demo_site_only_changes_map_view(window):
+    window.coords[0].setText("40")
+    window.site_button.click()
+    assert window.runway.center == (27.517888, -82.084153)
+    assert window.runway.robot is None and window.runway.preview_location is None
+    assert not window.runway.targets and window.coords[0].text() == "40"
+    assert window.station is None and window.radio is None
+
+
+def test_offline_replay_and_controls(window, monkeypatch):
+    monkeypatch.setattr(gs, "Radio", lambda *args: pytest.fail("Replay opened a serial connection"))
+    checked = []
+
+    def inspect():
+        dialog = QApplication.activeModalWidget()
+        try:
+            assert isinstance(dialog, gs.DemoReplay)
+            dialog.play.click()
+            assert not dialog.timer.isActive()
+            dialog.slider.setValue(dialog.slider.maximum())
+            assert dialog.phase.text() == "Mission complete at base"
+            assert dialog.play.text() == "Replay" and not dialog.grab().isNull()
+            dialog.play.click()
+            assert dialog.slider.value() == 0 and dialog.timer.isActive()
+            checked.append(True)
+        finally:
+            dialog.accept()
+
+    QTimer.singleShot(0, inspect)
+    window.demo_button.click()
+    assert checked and window.radio is None and window.station is None

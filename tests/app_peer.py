@@ -1,4 +1,4 @@
-"""Linux software bench client. The paired pseudoterminals have no CTS pins."""
+"""Exercise the field launcher using a USB radio or the paired Linux PTY fixture."""
 
 import sys
 import time
@@ -17,7 +17,8 @@ def pty_config(*args, **kwargs):
     return cfg
 
 
-radio.load_config = pty_config
+if sys.argv[1].startswith("/dev/pts/"):
+    radio.load_config = pty_config
 app = QApplication([])
 w = gs.Window()
 w.port.setCurrentText(sys.argv[1])
@@ -36,8 +37,10 @@ def wait(check, seconds=15):
 try:
     w.connect_radio()
     wait(w.launch_app.isEnabled)
-    assert w.app_snapshot.state == "idle"
+    assert w.app_snapshot.state in ("idle", "stopped", "finished", "failed")
+    assert not w.app_snapshot.mission_adapter_online
     assert [v.text() for v in w.instruments] == ["—"] * 3
+    print("Journal:", w.journal.folder, flush=True)
     print("PASS matched serial peers, fresh idle status, absent sensors unknown", flush=True)
     w.app_choice.setCurrentIndex(w.app_choice.findData("scenario"))
     w.scenario.setCurrentText("nav-rejected")

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from serial.tools import list_ports
 
 from appearance import field_theme
+from demo_replay import DemoReplay
 from location import LocationTrack
 from radio import Radio
 from runway_map import RunwayMap
@@ -150,6 +151,7 @@ class Window(QMainWindow):
         bar.addWidget(label("RavenStrike", "brand"))
         bar.addWidget(label("Ground station", "muted"))
         bar.addStretch()
+        self.demo_button = self.button(bar, "Demo replay", self.show_demo)
         self.link = label("", "link")
         bar.addWidget(self.link)
         self.port = QComboBox()
@@ -210,6 +212,8 @@ class Window(QMainWindow):
         bar.addWidget(label("Mission map", "heading"))
         bar.addStretch()
         self.runway = RunwayMap()
+        self.site_button = self.button(bar, "Demo site", self.locate_site)
+        self.site_button.setToolTip("Center map on the demo site · 27.517888, −82.084153")
         self.locate = self.button(bar, "Locate UGV", self.locate_robot)
         self.zoom_out = self.button(bar, "−", lambda: self.runway.change_zoom(-1))
         self.zoom_in = self.button(bar, "+", lambda: self.runway.change_zoom(1))
@@ -643,6 +647,19 @@ class Window(QMainWindow):
         self.event_line("Sent " + decision + "; awaiting UGV report")
         self.tick()
 
+    def show_demo(self):
+        if self.radio is None:
+            dialog = DemoReplay(self)
+            dialog.exec()
+            dialog.deleteLater()
+
+    def locate_site(self):
+        self.runway.center = (27.517888, -82.084153)
+        self.runway.zoom = 18
+        self.runway.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.runway.failed.clear()
+        self.runway.update()
+
     def locate_robot(self):
         if self.runway.robot:
             self.runway.center = self.runway.robot[:2]
@@ -764,6 +781,7 @@ class Window(QMainWindow):
         self.update_location(ready)
         self.update_cockpit(ready)
         st = self.station
+        self.demo_button.setEnabled(self.radio is None)
         self.port.setEnabled(self.radio is None)
         self.refresh.setEnabled(self.radio is None)
         state = "Disconnected"
@@ -964,6 +982,11 @@ if __name__ == "__main__":
         app.processEvents()
         if getattr(sys, "frozen", False) and window.build == "unknown":
             raise RuntimeError("Packaged build ID is missing")
+        replay = DemoReplay(window)
+        replay.slider.setValue(replay.slider.maximum())
+        if replay.phase.text() != "Mission complete at base":
+            raise RuntimeError("Packaged demo recording is incomplete")
+        replay.close()
         radio = Radio("", window.codec)
         task = window.codec.gps("offline", "fod-1", "UGV-1", 1.0, 2.0, 0.0)
         if window.codec.decode(window.codec.encode(task), task.__msgtype__) != task:

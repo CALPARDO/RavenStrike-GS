@@ -41,6 +41,12 @@ The footer shows the build ID and wire map version. **Copy diagnostics** copies 
 
 **Review** opens when evidence for the active target is ready. **View original images** shows the received JPEG previews at their native resolution. **Activity** timestamps events in UTC and **Open folder** opens the connection journal. The radio indicator distinguishes connecting, a missing port, a contract mismatch, and loss of an established link.
 
+## Demo replay and field site
+
+With the radio disconnected, choose **Demo replay** for a 1× playback of a recorded USB-to-header radio test. The track, FOD position and mission stages come from the GS journal of a simulated Nav2 mission with real radio traffic. Pause or drag the time slider to inspect operator review and return to base. The replay uses local metres and works offline.
+
+**Demo site** centers the online map at **27.517888, −82.084153**. You can use it before connecting or during a session. It only changes the map view. The surveyed home pose for a real mission is entered separately in **Start session**.
+
 ## Jetson apps and instruments
 
 Use the matching wire v5 desktop build. **Waiting for Jetson** means the GS is waiting for the peer handshake or heartbeat warm-up. **Contract mismatch** means both radios exchanged a handshake and the applications use different topic maps.
@@ -69,19 +75,20 @@ From the GS checkout:
 .venv/bin/pip install pytest
 .venv/bin/python -m pytest -q tests
 bash tests/check_codec.sh ../RavenStrike-UGV
-bash tests/bench.sh ../RavenStrike-UGV
-bash tests/bench.sh ../RavenStrike-UGV mission
+# On the Jetson with both radios and the idle field service running:
+QT_QPA_PLATFORM=offscreen PYTHONPATH=. .venv/bin/python tests/app_peer.py /dev/ttyUSB0
+# Give the isolated mission and review benches exclusive use of the header radio.
+(
+  sudo systemctl stop ravenstrike-field-radio
+  trap 'sudo systemctl start ravenstrike-field-radio' EXIT
+  bash tests/bench.sh ../RavenStrike-UGV mission && bash tests/bench.sh ../RavenStrike-UGV reviews
+)
 ```
 
 The codec check uses the built UGV ROS environment as a reference. It compares decoded values across implementations because CDR alignment padding can differ. The radio bench requires both lab radios on the Jetson, passwordless access to the existing UGV software sandbox, and exclusive access to the ports. Close the GS before running the bench. It starts the production UGV gateway and a non-actuating ROS test peer in a loopback-only namespace, exercises three review branches using the field GUI handlers, and suspends the gateway to check loss and recovery. It verifies true south on a rotated map, RTK loss, position-only display during TF loss and restored heading. Images, RTK fixes and mission responses are fixtures. No nav, camera, or cleaning hardware starts.
 
 The `mission` bench uses the same isolated radio pair with the actual UGV FSM, Nav2 and command guard. It submits one WGS84 target, waits for the UGV report, closes scanning, reviews synthetic imagery, approves via the field app and checks task completion and return within 0.1 m of the simulated home. It compares the received positions and headings against timestamp-matched simulation truth and saves `location-check.json` and the review screenshot beside the GS journal and prints the location of the Nav2 log and FSM journal. The simulator supplies movement, sensing and cleaning. Run the benches one at a time.
 
-On the 25 November 2026 Jetson radio bench, the GS received 65 timestamped fixes
-with heading during the simulated mission, at 0.91 Hz. Median fix age on receipt
-was 187 ms and the maximum was 285 ms. All received coordinates matched the
-simulated GNSS input to wire precision. Maximum bearing error against the
-simulated body orientation was 0.49°. A separate review run continued receiving
-fixes during an 11,409-byte JPEG transfer.
+The 25 November 2026 wire v5 radio mission supplies the desktop demo recording. It covered 10.57 simulated metres and returned to base. The GS received 72 fixes with heading (0.91 Hz). Median fix age was 177 ms, maximum age was 338 ms and maximum heading error against simulation truth was 0.64°. A separate run exercised all three review branches and continued receiving fixes during JPEG transfer. The field launcher test also confirmed stop on disconnect and no restart on reconnect.
 
 Before field use, commission actual receiver settings, site coordinates, reach, physical link loss and manual stop on Lynx. Test installation and USB operation on each additional OS. Local logs and site evidence are gitignored.
