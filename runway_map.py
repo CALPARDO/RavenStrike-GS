@@ -15,6 +15,7 @@ class RunwayMap(QWidget):
         super().__init__()
         self.setMinimumHeight(195)
         self.center = None
+        self.preview_location = self.drag = None
         self.zoom = 18
         self.targets = {}
         self.active = ""
@@ -35,7 +36,8 @@ class RunwayMap(QWidget):
     def preview(self, lat, lon):
         if not (-85.0511 <= lat <= 85.0511 and -180 <= lon <= 180):
             raise ValueError("The street map covers latitudes within ±85.05°.")
-        self.center = lat, lon
+        self.preview_location = self.center = lat, lon
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.failed.clear()
         self.update()
 
@@ -73,21 +75,61 @@ class RunwayMap(QWidget):
         reply.deleteLater()
         self.update()
 
-    def wheelEvent(self, event):
+    def reset_view(self):
+        self.center = self.preview_location = self.drag = None
+        self.active = ""
+        self.targets.clear()
+        self.unsetCursor()
+        self.update()
+
+    def change_zoom(self, steps):
         if self.center:
-            self.zoom = max(3, min(19, self.zoom + (1 if event.angleDelta().y() > 0 else -1)))
+            self.zoom = max(3, min(19, self.zoom + steps))
             self.update()
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y():
+            self.change_zoom(1 if event.angleDelta().y() > 0 else -1)
         event.accept()
+
+    def mousePressEvent(self, event):
+        if self.center and event.button() == Qt.MouseButton.LeftButton:
+            self.drag = (event.position(), self.pixel(*self.center))
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        if self.drag:
+            start, (x, y) = self.drag
+            delta = event.position() - start
+            size = 256 * 2**self.zoom
+            y = max(0, min(1, (y - delta.y()) / size))
+            self.center = (
+                math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y)))),
+                ((x - delta.x()) / size * 360) % 360 - 180,
+            )
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.drag and event.button() == Qt.MouseButton.LeftButton:
+            self.drag = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#dce4e6"))
+        p.fillRect(self.rect(), QColor("#eaf1f0"))
         if self.center is None:
-            p.drawText(
-                self.rect(),
-                Qt.AlignmentFlag.AlignCenter,
-                "Enter a location to preview the online map",
-            )
+            # A blank plotting grid, with no invented site or robot position.
+            p.setPen(QPen(QColor("#d3e1df"), 1))
+            for x in range(self.width() // 2 % 32, self.width(), 32):
+                p.drawLine(x, 0, x, self.height())
+            for y in range(self.height() // 2 % 32, self.height(), 32):
+                p.drawLine(0, y, self.width(), y)
+            message = "Preview a location to load the map"
+            w = p.fontMetrics().horizontalAdvance(message) + 32
+            plate = QRect((self.width() - w) // 2, (self.height() - 36) // 2, w, 36)
+            p.fillRect(plate, QColor("#ffffff"))
+            p.setPen(QColor("#365851"))
+            p.drawText(plate, Qt.AlignmentFlag.AlignCenter, message)
             return
         cx, cy = self.pixel(*self.center)
         left, top = round(cx - self.width() / 2), round(cy - self.height() / 2)
@@ -100,9 +142,15 @@ class RunwayMap(QWidget):
                 else:
                     self.load(key)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for name, location in self.targets.items():
+
+        def screen_point(location):
             x, y = self.pixel(*location)
-            pt = QPointF(x - left, y - top)
+            width = count * 256
+            x = cx + (x - cx + width / 2) % width - width / 2
+            return QPointF(x - left, y - top)
+
+        for name, location in self.targets.items():
+            pt = screen_point(location)
             p.setPen(QPen(Qt.GlobalColor.white, 2))
             p.setBrush(QColor("#bb4c15" if name == self.active else "#186784"))
             p.drawEllipse(pt, 6, 6)
@@ -110,7 +158,8 @@ class RunwayMap(QWidget):
             p.drawText(pt + QPointF(9, 4), name)
         p.setPen(QPen(QColor("#252c35"), 2))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(QPointF(cx - left, cy - top), 9, 9)
+        if self.preview_location:
+            p.drawEllipse(screen_point(self.preview_location), 9, 9)
         caption = "© OpenStreetMap contributors"
         if self.failed:
             caption = "Map tiles unavailable   ·   " + caption

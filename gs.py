@@ -6,118 +6,337 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths, Qt, QTimer
-from PySide6.QtGui import QImageReader, QPixmap
+from PySide6.QtCore import QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGridLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 from serial.tools import list_ports
 
+from appearance import field_theme
 from radio import Radio
 from runway_map import RunwayMap
 from station import Journal, Station
 from wire import Codec
 
 
+def label(text, name=""):
+    widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
+    widget.setObjectName(name)
+    return widget
+
+
+def card(column, stretch=0):
+    panel = QFrame()
+    panel.setObjectName("card")
+    column.addWidget(panel, stretch)
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(14, 12, 14, 12)
+    layout.setSpacing(8)
+    return layout
+
+
+class EvidencePreview(QLabel):
+    def __init__(self):
+        super().__init__("No image")
+        self.original = QPixmap()
+        self.setObjectName("evidence")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumWidth(80)
+        self.setFixedHeight(115)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def set_image(self, image):
+        self.original = image
+        if image.isNull():
+            self.setText("No image")
+        else:
+            self.fit_image()
+
+    def fit_image(self):
+        if not self.original.isNull():
+            self.setPixmap(
+                self.original.scaled(
+                    self.contentsRect().size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_image()
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
+        field_theme(QApplication.instance())
         self.codec = Codec()
         self.radio = self.station = self.journal = None
-        self.shown = None
-        self.presentation = None
-        self.last_rx = None
+        self.log_folder = self.last_rx = self.presentation = self.shown = None
+        self.queue_rows = self.link_state = self.last_event = None
         self.setWindowTitle("RavenStrike | Field ground station")
-        widget = QWidget()
-        self.setCentralWidget(widget)
-        layout = QVBoxLayout(widget)
-        title = QLabel("RavenStrike   /   Ground station")
-        title.setStyleSheet("font-size:22px; font-weight:600")
-        layout.addWidget(title)
-        connection = QHBoxLayout()
-        layout.addLayout(connection)
+        root = QWidget()
+        self.setCentralWidget(root)
+        shell = QVBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        header = QFrame()
+        header.setObjectName("header")
+        bar = QHBoxLayout(header)
+        bar.setContentsMargins(18, 10, 18, 10)
+        mark = QLabel()
+        mark.setPixmap(self.windowIcon().pixmap(34, 34))
+        bar.addWidget(mark)
+        bar.addWidget(label("RavenStrike", "brand"))
+        bar.addWidget(label("Ground station", "muted"))
+        bar.addStretch()
+        self.link = label("", "link")
+        bar.addWidget(self.link)
         self.port = QComboBox()
         self.port.setEditable(True)
-        connection.addWidget(self.port, 1)
-        self.refresh = self.button(connection, "Refresh ports", self.ports)
-        self.connect_button = self.button(connection, "Connect", self.connect_radio)
-        self.link = QLabel()
-        connection.addWidget(self.link)
-        controls = QHBoxLayout()
-        layout.addLayout(controls)
-        self.start = self.button(controls, "Start session", self.start_session)
-        self.scan = self.button(
-            controls,
-            "Scanning complete",
-            lambda: self.confirm("scan_complete", "Finish scanning and drain the queue?"),
-        )
-        self.abort = self.button(
-            controls,
-            "Abort to base",
-            lambda: self.confirm("abort", "Request abort and return to base?"),
-        )
-        self.status = QLabel("No active session")
-        self.status.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.status)
-        form = QHBoxLayout()
-        layout.addLayout(form)
-        self.coords = []
-        for field in ("Latitude °", "Longitude °", "Ellipsoid altitude m"):
-            edit = QLineEdit()
-            edit.setPlaceholderText(field)
-            edit.setAccessibleName(field)
-            self.coords.append(edit)
-            form.addWidget(edit)
-        self.button(form, "Preview on map", self.map)
-        self.submit = self.button(form, "Send FOD", self.add)
-        self.runway = RunwayMap()
-        layout.addWidget(self.runway)
-        self.tasks = QPlainTextEdit()
-        self.tasks.setReadOnly(True)
-        self.tasks.setPlaceholderText("Submitted locations and the UGV-reported queue")
-        layout.addWidget(self.tasks)
-        box = QGroupBox("Operator review")
-        layout.addWidget(box)
-        review = QGridLayout(box)
-        self.pictures = []
-        for i, name in enumerate(("Before", "Review")):
-            label = QLabel(name)
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setMinimumSize(200, 100)
-            review.addWidget(label, 0, i)
-            self.pictures.append(label)
-        self.review_text = QLabel()
-        self.review_text.setTextFormat(Qt.TextFormat.PlainText)
-        review.addWidget(self.review_text, 1, 0, 1, 2)
-        actions = QHBoxLayout()
-        review.addLayout(actions, 2, 0, 1, 2)
-        self.approve = self.button(actions, "Continue", lambda: self.decide("approve"))
-        self.retry = self.button(actions, "Clean again", lambda: self.decide("retry"))
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(400)
-        self.log.setPlaceholderText("Radio and mission events")
-        layout.addWidget(self.log)
+        self.port.setAccessibleName("Radio serial port")
+        self.port.lineEdit().setPlaceholderText("Serial port")
+        self.port.setMinimumWidth(105)
+        self.port.setMaximumWidth(190)
+        bar.addWidget(self.port)
+        self.refresh = self.button(bar, "Refresh", self.ports)
+        self.refresh.setToolTip("Refresh serial ports")
+        self.connect_button = self.button(bar, "Connect", self.connect_radio)
+        self.connect_button.setObjectName("primary")
+        shell.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        body.setObjectName("workspace")
+        scroll.setWidget(body)
+        shell.addWidget(scroll, 1)
+        columns = QHBoxLayout(body)
+        columns.setContentsMargins(16, 12, 16, 12)
+        columns.setSpacing(14)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        left.setSpacing(12)
+        right.setSpacing(12)
+        columns.addLayout(left, 3)
+        columns.addLayout(right, 2)
+        self.map_panel(left)
+        self.mission_panel(right)
+        self.activity_panel(right)
+
+        footer = QFrame()
+        footer.setObjectName("footer")
+        foot = QHBoxLayout(footer)
+        foot.setContentsMargins(16, 5, 16, 5)
+        self.feedback = label("Select a radio port to connect.", "muted")
+        self.feedback.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        foot.addWidget(self.feedback, 1)
+        self.last_update = label("", "muted")
+        foot.addWidget(self.last_update)
+        shell.addWidget(footer)
         self.ports()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(100)
         self.tick()
+        self.resize(1120, 740)
+
+    def map_panel(self, column):
+        pane = card(column, stretch=1)
+        bar = QHBoxLayout()
+        pane.addLayout(bar)
+        bar.addWidget(label("Mission map", "heading"))
+        bar.addStretch()
+        self.runway = RunwayMap()
+        self.zoom_out = self.button(bar, "−", lambda: self.runway.change_zoom(-1))
+        self.zoom_in = self.button(bar, "+", lambda: self.runway.change_zoom(1))
+        for button, name in [(self.zoom_out, "Zoom out"), (self.zoom_in, "Zoom in")]:
+            button.setFixedWidth(35)
+            button.setAccessibleName(name)
+            button.setToolTip(name)
+        pane.addWidget(self.runway, 1)
+        self.map_caption = label("WGS84   ·   No location selected", "muted")
+        pane.addWidget(self.map_caption)
+        pane = card(column)
+        pane.addWidget(label("Send a FOD location", "heading"))
+        fields = QHBoxLayout()
+        pane.addLayout(fields)
+        self.coords = []
+        for name, unit in (
+            ("Latitude", "degrees"),
+            ("Longitude", "degrees"),
+            ("Altitude", "m, ellipsoid"),
+        ):
+            field = QVBoxLayout()
+            fields.addLayout(field, 1)
+            edit = QLineEdit()
+            edit.setMinimumWidth(65)
+            edit.setPlaceholderText(unit)
+            caption = label(name, "field")
+            caption.setBuddy(edit)
+            field.addWidget(caption)
+            field.addWidget(edit)
+            self.coords.append(edit)
+        row = QHBoxLayout()
+        pane.addLayout(row)
+        row.addStretch()
+        self.preview = self.button(row, "Preview on map", self.map)
+        self.submit = self.button(row, "Send FOD", self.add)
+        self.submit.setObjectName("primary")
+
+    def mission_panel(self, column):
+        pane = card(column)
+        pane.addWidget(label("Mission control", "heading"))
+        self.status = label("")
+        self.status.setWordWrap(True)
+        pane.addWidget(self.status)
+        self.active_target = label("", "muted")
+        self.active_target.setWordWrap(True)
+        pane.addWidget(self.active_target)
+        self.start = self.button(pane, "Start session", self.start_session)
+        row = QHBoxLayout()
+        pane.addLayout(row)
+        self.scan = self.button(
+            row,
+            "Scanning complete",
+            lambda: self.confirm("scan_complete", "Finish scanning and drain the queue?"),
+        )
+        self.abort = self.button(
+            row, "Abort to base", lambda: self.confirm("abort", "Request abort and return to base?")
+        )
+        self.abort.setObjectName("abort")
+
+    def activity_panel(self, column):
+        self.tabs = QTabWidget()
+        column.addWidget(self.tabs, 1)
+        targets = QWidget()
+        self.tabs.addTab(targets, "Targets")
+        pane = QVBoxLayout(targets)
+        self.queue_caption = label("Target register", "heading")
+        pane.addWidget(self.queue_caption)
+        self.tasks = QTableWidget(0, 2)
+        self.tasks.setAccessibleName("Mission targets")
+        self.tasks.setHorizontalHeaderLabels(["FOD ID", "UGV status"])
+        self.tasks.verticalHeader().hide()
+        self.tasks.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.tasks.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tasks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tasks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tasks.setShowGrid(False)
+        self.tasks.setAlternatingRowColors(True)
+        self.tasks.itemActivated.connect(self.locate_row)
+        pane.addWidget(self.tasks)
+        self.empty_targets = label("Submitted and UGV-reported targets appear here.", "muted")
+        self.empty_targets.setWordWrap(True)
+        self.empty_targets.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pane.addWidget(self.empty_targets, 1)
+        self.review_page = QWidget()
+        self.tabs.addTab(self.review_page, "Review")
+        review = QVBoxLayout(self.review_page)
+        review.addWidget(label("Operator review", "heading"))
+        self.review_text = label("")
+        self.review_text.setWordWrap(True)
+        review.addWidget(self.review_text)
+        images = QHBoxLayout()
+        review.addLayout(images)
+        self.pictures = []
+        for name in ("Before", "Review"):
+            tile = QVBoxLayout()
+            images.addLayout(tile, 1)
+            tile.addWidget(label(name, "field"))
+            picture = EvidencePreview()
+            tile.addWidget(picture)
+            self.pictures.append(picture)
+        self.inspect = self.button(review, "View original images", self.inspect_images)
+        actions = QHBoxLayout()
+        review.addLayout(actions)
+        self.approve = self.button(actions, "Continue", lambda: self.decide("approve"))
+        self.approve.setObjectName("primary")
+        self.retry = self.button(actions, "Clean again", lambda: self.decide("retry"))
+        review.addStretch()
+        activity = QWidget()
+        self.tabs.addTab(activity, "Activity")
+        pane = QVBoxLayout(activity)
+        bar = QHBoxLayout()
+        pane.addLayout(bar)
+        bar.addWidget(label("Event log", "heading"))
+        bar.addStretch()
+        self.open_logs = self.button(bar, "Open folder", self.open_log_folder)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(400)
+        self.log.setPlaceholderText("Radio and operator events appear here.")
+        pane.addWidget(self.log)
+
+    def inspect_images(self):
+        st = self.station
+        if not self.shown or not st or self.shown != st.review_token():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review images · " + st.active)
+        layout = QVBoxLayout(dialog)
+        row = QHBoxLayout()
+        layout.addLayout(row)
+        for title, preview in zip(("Before", "Review"), self.pictures):
+            if preview.original.isNull():
+                continue
+            tile = QVBoxLayout()
+            row.addLayout(tile)
+            tile.addWidget(label(title, "field"))
+            picture = QLabel()
+            picture.setPixmap(preview.original)
+            tile.addWidget(picture)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
+
+    def open_log_folder(self):
+        if self.log_folder and not QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(self.log_folder))
+        ):
+            raise ValueError(f"Open the log folder manually: {self.log_folder}")
+
+    def locate_row(self, item):
+        name = self.tasks.item(item.row(), 0).text()
+        location = self.runway.targets.get(name)
+        if location and abs(location[0]) <= 85.0511:
+            self.runway.preview(*location)
+        else:
+            self.event_line(f"No mappable coordinates available for {name}.")
+
+    def event_line(self, text):
+        if text != self.last_event:
+            self.log.appendPlainText(time.strftime("%H:%M:%S", time.gmtime()) + " UTC   " + text)
+        self.last_event = text
+        self.feedback.setText(text)
+        self.feedback.setToolTip(text)
 
     def button(self, row, name, fn):
         button = QPushButton(name)
@@ -128,7 +347,7 @@ class Window(QMainWindow):
             except OSError as err:
                 self.log_failure(err)
             except (ValueError, RuntimeError) as err:
-                self.log.appendPlainText(str(err))
+                self.event_line(str(err))
                 if self.journal:
                     self.journal.log("operator_error", str(err))
 
@@ -137,9 +356,12 @@ class Window(QMainWindow):
         return button
 
     def ports(self):
+        previous = self.port.currentText()
         self.port.clear()
         for p in sorted(list_ports.comports(), key=lambda p: (p.vid is None, p.device)):
             self.port.addItem(p.device)
+        if previous:
+            self.port.setCurrentText(previous)
 
     def connect_radio(self):
         if self.radio:
@@ -157,11 +379,14 @@ class Window(QMainWindow):
         root = Path(__file__).resolve().parent
         if getattr(sys, "frozen", False):
             root = Path(
-                QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+                QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppLocalDataLocation
+                )
             )
         self.journal = Journal(root / "logs")
         self.journal.log("connect", port)
-        self.log.appendPlainText("Log directory: " + str(self.journal.folder))
+        self.log_folder = self.journal.folder
+        self.event_line("Log directory: " + str(self.log_folder))
         self.radio = Radio(port, self.codec)
         self.station = Station(self.codec, self.radio, self.journal)
         self.radio.start()
@@ -176,6 +401,7 @@ class Window(QMainWindow):
             self.journal.log("disconnect", "Operator closed connection")
             self.journal.close()
         self.radio = self.station = self.journal = None
+        self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
         self.tick()
@@ -207,8 +433,8 @@ class Window(QMainWindow):
         if dialog.exec():
             callsign, area, x, y, yaw = [e.text().strip() for e in edits]
             self.station.start(callsign, area, (float(x), float(y), math.radians(float(yaw))))
-            self.runway.targets.clear()
-            self.runway.update()
+            self.runway.reset_view()
+            self.event_line("Start requested · Awaiting UGV acceptance")
 
     def map(self):
         lat, lon = [float(e.text()) for e in self.coords[:2]]
@@ -222,17 +448,23 @@ class Window(QMainWindow):
         self.runway.targets[mission] = coords[:2]
         if abs(coords[0]) <= 85.0511:
             self.runway.preview(*coords[:2])
-        self.log.appendPlainText("Sent " + mission + "; awaiting UGV report")
+        self.event_line("Sent " + mission + "; awaiting UGV report")
         for e in self.coords:
             e.clear()
 
     def confirm(self, command, prompt):
         if QMessageBox.question(self, "Mission control", prompt) == QMessageBox.StandardButton.Yes:
             self.station.command(command)
+            self.event_line(
+                "Scanning complete requested"
+                if command == "scan_complete"
+                else "Abort to base requested"
+            )
+            self.tick()
 
     def decide(self, decision):
         self.station.decide(self.shown, decision)
-        self.log.appendPlainText("Sent " + decision + "; awaiting UGV report")
+        self.event_line("Sent " + decision + "; awaiting UGV report")
         self.tick()
 
     def drain(self):
@@ -247,21 +479,21 @@ class Window(QMainWindow):
                     msg = self.codec.decode(data["payload"], self.radio.engine.topics[topic].type)
                     self.station.receive(topic, msg, when)
                     self.last_rx = time.monotonic()
-                    self.log.appendPlainText(
-                        getattr(msg, "mission_id", "")
-                        + " "
-                        + (getattr(msg, "notes", "") or getattr(msg, "kind", ""))
-                    )
+                    parts = [
+                        getattr(msg, field, "")
+                        for field in ("mission_id", "state", "status", "notes", "kind")
+                    ]
+                    self.event_line("UGV  ·  " + "  ·  ".join(part for part in parts if part))
                 except OSError:
                     raise
                 except Exception as err:  # noqa: BLE001 - reject malformed incoming data and keep the operator loop alive
                     self.journal.log("invalid_message", str(err), received=when, topic=topic)
-                    self.log.appendPlainText("Invalid message: " + str(err))
+                    self.event_line("Invalid message: " + str(err))
             else:
                 detail = data.get("detail", str(data))
                 self.journal.log(event, detail, received=when, fields=data)
                 if event not in ("ack", "nack"):
-                    self.log.appendPlainText(event + " " + detail)
+                    self.event_line(event + " " + detail)
 
     def log_failure(self, err):
         if self.radio:
@@ -272,8 +504,10 @@ class Window(QMainWindow):
             except OSError:
                 pass
         self.radio = self.journal = self.station = None
+        self.runway.reset_view()
         self.connect_button.setText("Connect")
-        self.log.appendPlainText("Ground station disconnected. Check log storage: " + str(err))
+        self.last_rx = None
+        self.event_line("Ground station disconnected. Check log storage: " + str(err))
 
     def tick(self):
         if self.radio:
@@ -287,9 +521,31 @@ class Window(QMainWindow):
         st = self.station
         self.port.setEnabled(self.radio is None)
         self.refresh.setEnabled(self.radio is None)
-        self.link.setText(
-            ("Ready" if ready else "Link unavailable") if self.radio else "Disconnected"
-        )
+        state = "Disconnected"
+        if self.radio:
+            if ready:
+                state = "Radio ready"
+            elif self.radio.engine.lost or self.radio.overflow.is_set():
+                state = "Link lost"
+            elif self.radio.engine.port_error:
+                state = "Port unavailable"
+            elif self.radio.engine.config_match is False:
+                state = "Contract mismatch"
+            else:
+                state = "Connecting"
+        if self.link_state != state:
+            self.link_state = state
+            bg, fg = {
+                "Disconnected": ("#e9eff0", "#476069"),
+                "Connecting": ("#fff1cb", "#754b08"),
+                "Link lost": ("#ffe4de", "#96382d"),
+                "Port unavailable": ("#ffe4de", "#96382d"),
+                "Contract mismatch": ("#ffe4de", "#96382d"),
+                "Radio ready": ("#d6f1e8", "#125d4b"),
+            }[state]
+            self.link.setText(state)
+            self.link.setStyleSheet(f"background: {bg}; color: {fg};")
+        self.open_logs.setEnabled(self.log_folder is not None)
         self.start.setText(
             "Retry start" if st and st.state == "awaiting acceptance" else "Start session"
         )
@@ -305,37 +561,49 @@ class Window(QMainWindow):
         self.submit.setEnabled(
             bool(ready and st.operating and not st.scanned and not st.scanning_requested)
         )
-        self.scan.setEnabled(self.submit.isEnabled())
-        age = (
-            f"   ·   Last UGV update {time.monotonic() - self.last_rx:.0f}s ago"
-            if self.last_rx
-            else ""
+        self.scan.setText(
+            "Scanning closed"
+            if st and st.scanned
+            else "Scan requested"
+            if st and st.scanning_requested
+            else "Scanning complete"
         )
+        self.abort.setText("Abort requested" if st and st.abort_requested else "Abort to base")
+        self.scan.setEnabled(self.submit.isEnabled())
+        self.last_update.setText(
+            f"Last UGV message   {time.monotonic() - self.last_rx:.0f}s ago" if self.last_rx else ""
+        )
+        note = st.note if st else ""
+        if note == "OK_TO_MOVE_FORWARD":
+            note = "Waiting for operator review"
+        elif note.isupper() and "_" in note:
+            note = note.replace("_", " ").capitalize()
         self.status.setText(
-            f"{st.callsign}   {st.state}   {st.note}   {age}"
+            "   ·   ".join(x for x in (st.callsign, st.area, st.state.capitalize(), note) if x)
             if st and st.session
             else "No active session"
         )
         active = st.active if st else ""
+        self.active_target.setText("Active target   " + (active or "—"))
         if self.runway.active != active:
             self.runway.active = active
             self.runway.update()
-        queue_text = ""
-        if st:
-            queue_text = (
-                "Active: "
-                + (st.active or "—")
-                + "    Queue: "
-                + (", ".join(st.queue) or "—")
-                + "\n"
-            )
-            queue_text += "\n".join(f"{k}    {v}" for k, v in st.targets.items())
-        if self.tasks.toPlainText() != queue_text:
-            self.tasks.setPlainText(queue_text)
+        location = self.runway.center
+        self.zoom_out.setEnabled(bool(location and self.runway.zoom > 3))
+        self.zoom_in.setEnabled(bool(location and self.runway.zoom < 19))
+        self.map_caption.setText(
+            f"WGS84   ·   Map center   {location[0]:.5f}°, {location[1]:.5f}°"
+            if location
+            else "WGS84   ·   No location selected"
+        )
+        self.update_targets(st, active)
         token = st.review_token() if st else None
         before = st.latest.get((st.active, "before")) if st and token else None
         if (token, before) != self.presentation:
             self.presentation = (token, before)
+            if token and token != self.shown:
+                self.tabs.setCurrentWidget(self.review_page)
+            self.tabs.setTabText(1, "Review •" if token else "Review")
             self.shown = token
             kind = st.records[token][0] if token else ""
             self.approve.setText("Approve removal" if kind == "after" else "Continue")
@@ -348,8 +616,8 @@ class Window(QMainWindow):
             self.review_text.setText(
                 st.active + "   " + display[kind] if token else "Awaiting current review"
             )
-            for label, name, key in zip(self.pictures, ("Before", "Review"), ("before", "review")):
-                label.setText(name)
+            for label, key in zip(self.pictures, ("before", "review")):
+                label.set_image(QPixmap())
                 if token:
                     item = st.latest.get((st.active, key))
                     path = st.records[item][1] if item else None
@@ -357,15 +625,47 @@ class Window(QMainWindow):
                         reader = QImageReader(str(path))
                         size = reader.size()
                         if 0 < size.width() <= 320 and 0 < size.height() <= 240:
-                            label.setPixmap(QPixmap.fromImage(reader.read()))
+                            label.set_image(QPixmap.fromImage(reader.read()))
         image_ok = bool(
             token
             and (st.records[token][0] == "cycle_complete" or not self.pictures[1].pixmap().isNull())
         )
+        self.inspect.setEnabled(any(not image.original.isNull() for image in self.pictures))
         self.approve.setEnabled(ready and image_ok)
         self.retry.setEnabled(
             bool(ready and token and st.records[token][0] != "cycle_complete" and image_ok)
         )
+
+    def update_targets(self, st, active):
+        queued = st.queue if st else []
+        reports = st.targets if st else {}
+        names = dict.fromkeys(([active] if active else []) + queued + list(reports))
+        positions = {name: i for i, name in enumerate(queued, 1)}
+        rows = []
+        for name in names:
+            role = (
+                "Active"
+                if name == active
+                else f"Queue {positions[name]}"
+                if name in positions
+                else ""
+            )
+            rows.append((name, " · ".join(filter(None, (role, reports.get(name, ""))))))
+        caption = "Target register"
+        if st and st.last_status >= 0:
+            caption += f"   ·   {len(queued)} queued"
+        self.queue_caption.setText(caption)
+        if rows == self.queue_rows:
+            return
+        self.queue_rows = rows
+        self.tasks.setVisible(bool(rows))
+        self.empty_targets.setVisible(not rows)
+        self.tasks.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            for j, value in enumerate(row):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.tasks.setItem(i, j, item)
 
     def closeEvent(self, event):
         if (
@@ -384,7 +684,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("RavenStrike-GS")
     window = Window()
-    window.resize(880, 680)
     window.show()
     if "--self-test" in sys.argv:
         # Exercise the packaged GUI, wire map and dynamically loaded CDR store offline.

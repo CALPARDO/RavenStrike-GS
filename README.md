@@ -31,6 +31,12 @@ python3 -m venv .venv
 4. Choose **Scanning complete** after sending the last task. For each review, match the active ID to the preview. Choose **Approve removal** or **Clean again** for an after-image. For a not-found image choose **Continue** or **Search again**. A cycle-complete token offers **Continue** and records removal as unverified. The UGV decides the outcome and any applicable timeouts.
 5. Wait for the UGV's terminal session status. **Abort to base** requests a mission abort through the FSM. Physical emergency stop remains a platform function.
 
+## Operator console
+
+The console opens in light mode. The mission map supports drag to pan, scroll or **+/−** to zoom, and coordinate preview before connecting. Double-click a target in **Targets** to center its known coordinates. Queue positions and the active ID come from the UGV. A target discovered onboard may have only an ID on the radio link.
+
+**Review** opens when evidence for the active target is ready. **View original images** shows the received JPEG previews at their native resolution. **Activity** timestamps events in UTC and **Open folder** opens the connection journal. The radio indicator distinguishes connecting, a missing port, a contract mismatch, and loss of an established link.
+
 ## Logs and recovery
 
 Each connection creates a folder under `logs/` beside the source or, for packaged apps, in the user’s application data directory. The window prints the full path on connection. `console.log` records radio and mission events in UTC. `events.jsonl` includes elapsed time, typed message fields, evidence IDs, operator requests, local send results, radio ACKs and retry counts. JPEGs are checked against the received SHA-256 and saved as `evidence/<preview_sha256>.jpg`. A transport ACK means the remote bridge received the bytes. Mission acceptance comes from a UGV report.
@@ -49,11 +55,14 @@ From the GS checkout:
 
 ```bash
 .venv/bin/pip install pytest
-.venv/bin/python -m pytest -q tests/test_station.py
+.venv/bin/python -m pytest -q tests
 bash tests/check_codec.sh ../RavenStrike-UGV
 bash tests/bench.sh ../RavenStrike-UGV
+bash tests/bench.sh ../RavenStrike-UGV mission
 ```
 
 The codec check uses the built UGV ROS environment as a reference. It compares decoded values across implementations because CDR alignment padding can differ. The radio bench requires both lab radios on the Jetson, passwordless access to the existing UGV software sandbox, and exclusive access to the ports. Close the GS before running the bench. It starts the production UGV gateway and a non-actuating ROS test peer in a loopback-only namespace, exercises three review branches using the field GUI handlers, and suspends the gateway to check loss and recovery. Images and mission responses are fixtures. No nav, camera, or cleaning hardware starts.
 
-Before field use, run the field client against the production FSM through a full simulated mission, then commission actual receiver settings, site coordinates, reach, physical link loss and manual stop on Lynx. Test installation and USB operation on each additional OS. Local logs and site evidence are gitignored.
+The `mission` bench uses the same isolated radio pair with the actual UGV FSM, Nav2 and command guard. It submits one WGS84 target, waits for the UGV report, closes scanning, reviews synthetic imagery, approves via the field app and checks task completion and return within 0.1 m of the simulated home. It saves the review screenshot beside the GS journal and prints the location of the Nav2 log and FSM journal. The simulator supplies movement, sensing and cleaning. Run the benches one at a time.
+
+Before field use, commission actual receiver settings, site coordinates, reach, physical link loss and manual stop on Lynx. Test installation and USB operation on each additional OS. Local logs and site evidence are gitignored.

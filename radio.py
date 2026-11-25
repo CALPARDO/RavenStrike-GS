@@ -17,6 +17,7 @@ class FieldEngine(BridgeEngine):
         super().__init__(*args)
         self.event = event
         self.link_since = None
+        self.port_error = ""
         self.established = False
         self.lost = False
 
@@ -39,6 +40,9 @@ class FieldEngine(BridgeEngine):
             self.check_link()
 
     def _transport_state(self, connected, detail):
+        self.port_error = "" if connected else detail
+        if not connected and not self.established:
+            self.event("port_unavailable", detail=detail)
         if not connected and self.established:
             self.lost = True
         super()._transport_state(connected, detail)
