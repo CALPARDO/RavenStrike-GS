@@ -14,6 +14,7 @@ if sys.argv[1] == "field":
         path.with_suffix(".roundtrip").write_bytes(codec.encode(value))
     for msg in [
         codec.stamp(),
+        codec.types["AppCommand"](codec.stamp(), "a" * 32, "start", "scenario", "retry", True),
         codec.control("s-23", "UGV-1", "test", (1.125, -3.0, 1.5708), "start"),
         codec.gps("s-23", "fod-1", "UGV-1", 40.0, -82.99997, 201.5),
         codec.types["OperatorDecision"](codec.stamp(), "s-23", "fod-1", "ev123", "approve"),
@@ -23,10 +24,23 @@ else:
     from ravenstrike_interfaces.msg import VerificationReport
     from rclpy.serialization import deserialize_message, serialize_message
     from rosidl_runtime_py.utilities import get_message
-    from ugv_mission_interfaces.msg import Evidence, RobotLocation, SessionStatus
+    from ugv_mission_interfaces.msg import (
+        AppStatus,
+        Evidence,
+        RobotLocation,
+        SessionStatus,
+    )
 
     if sys.argv[1] == "generate":
         records = [
+            AppStatus(
+                job_id="a" * 32,
+                app="scenario",
+                state="running",
+                battery_percent=-1,
+                estop=1,
+                mission_adapter_online=True,
+            ),
             RobotLocation(latitude_e7=-123456789, longitude_e7=1799999999, heading_cdeg=65535),
             SessionStatus(
                 session_id="odd-length", state="working", queued_mission_ids=["a", "FOD-3"]

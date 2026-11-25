@@ -1,17 +1,20 @@
 """Run the field ground station with python gs.py. Nothing transmits on startup."""
 
+import json
 import math
 import queue
 import subprocess
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import QStandardPaths, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -40,7 +43,7 @@ from location import LocationTrack
 from radio import Radio
 from runway_map import RunwayMap
 from station import Journal, Station
-from wire import WIRE_MAP_VERSION, Codec
+from wire import CONTRACT, WIRE_MAP_VERSION, Codec
 
 
 def build_id():
@@ -125,6 +128,8 @@ class Window(QMainWindow):
         field_theme(QApplication.instance())
         self.build = build_id()
         self.codec = Codec()
+        self.app_snapshot = None
+        self.app_stamp = self.app_received = self.pending_until = 0
         self.track = LocationTrack()
         self.radio = self.station = self.journal = None
         self.log_folder = self.last_rx = self.presentation = self.shown = None
@@ -215,6 +220,16 @@ class Window(QMainWindow):
         pane.addWidget(self.runway, 1)
         self.map_caption = label("WGS84   ·   No location selected", "muted")
         pane.addWidget(self.map_caption)
+        meters = QHBoxLayout()
+        pane.addLayout(meters)
+        self.instruments = []
+        for name in ("BATTERY", "E-STOP", "HEADING"):
+            meter = QVBoxLayout()
+            meters.addLayout(meter, 1)
+            meter.addWidget(label(name, "field"))
+            value = label("—", "heading")
+            meter.addWidget(value)
+            self.instruments.append(value)
         self.robot_caption = label("", "muted")
         pane.addWidget(self.robot_caption)
         pane = card(column)
@@ -340,6 +355,96 @@ class Window(QMainWindow):
         self.log.setPlaceholderText("Radio and operator events appear here.")
         pane.addWidget(self.log)
 
+        apps = QWidget()
+        self.tabs.addTab(apps, "Jetson")
+        layout = QVBoxLayout(apps)
+        layout.addWidget(label("Simulation launcher", "heading"))
+        self.catalog = json.loads((CONTRACT / "apps.json").read_text())
+        self.app_choice = QComboBox()
+        for key, spec in self.catalog.items():
+            self.app_choice.addItem(spec["label"], key)
+        self.scenario = QComboBox()
+        self.scenario.addItems(self.catalog["scenario"]["scenarios"])
+        self.scenario.setCurrentText(self.catalog["scenario"]["defaults"]["scenario"])
+        self.wait_timeout = QCheckBox("Exercise operator timeout")
+        self.wait_timeout.setChecked(self.catalog["scenario"]["defaults"]["wait_timeout"])
+        layout.addWidget(self.app_choice)
+        layout.addWidget(self.scenario)
+        layout.addWidget(self.wait_timeout)
+        actions = QHBoxLayout()
+        layout.addLayout(actions)
+        self.launch_app = self.button(actions, "Run simulation", lambda: self.app_command("start"))
+        self.stop_app = self.button(actions, "Stop simulation", lambda: self.app_command("stop"))
+        self.job_label = label("", "muted")
+        self.job_label.setWordWrap(True)
+        layout.addWidget(self.job_label)
+        layout.addStretch()
+
+    def app_command(self, operation):
+        snap = self.app_snapshot
+        if not self.radio or not self.radio.ready or not self.app_fresh():
+            raise ValueError("Wait for Jetson status.")
+        key = self.app_choice.currentData()
+        scenario = self.scenario.currentText() if key == "scenario" else ""
+        timeout = bool(scenario and self.wait_timeout.isChecked())
+        if operation == "stop":
+            if snap.state != "running":
+                raise ValueError("No running simulation.")
+            request, key, scenario, timeout = snap.job_id, snap.app, "", False
+        else:
+            if snap.state in ("running", "stopping"):
+                raise ValueError("A simulation is already active.")
+            request = uuid4().hex
+        msg = self.codec.types["AppCommand"](
+            self.codec.stamp(), request, operation, key, scenario, timeout
+        )
+        self.station.send(21, msg, f"{operation.capitalize()} {key} {scenario}".strip())
+        self.pending_until = time.monotonic() + 5
+        self.pending_job = request
+        self.pending_op = operation
+        self.tick()
+
+    def app_fresh(self):
+        return (
+            self.app_snapshot is not None
+            and time.monotonic() - self.app_received < 3
+            and (-0.2 <= (time.time_ns() - self.app_stamp) / 1e9 < 3)
+        )
+
+    def update_cockpit(self, ready):
+        snap = self.app_snapshot if ready and self.app_fresh() else None
+        pose = self.track.current() if ready else None
+        values = ["—", "—", "—"]
+        if snap:
+            if 0 <= snap.battery_percent <= 100:
+                values[0] = f"{snap.battery_percent}%"
+            values[1] = {0: "Released", 1: "Active"}.get(snap.estop, "—")
+        if pose and pose[2] is not None:
+            values[2] = f"{pose[2]:.0f}° T"
+        for widget, value in zip(self.instruments, values):
+            widget.setText(value)
+        if self.pending_until and time.monotonic() >= self.pending_until:
+            self.pending_until = 0
+            self.event_line("Jetson did not confirm the request. Check the reported job state.")
+        pending = bool(self.pending_until)
+        running = snap and snap.state in ("running", "stopping")
+        available = bool(snap and not running and not pending)
+        self.app_choice.setEnabled(available)
+        scenario = self.app_choice.currentData() == "scenario"
+        self.scenario.setVisible(scenario)
+        self.wait_timeout.setVisible(scenario)
+        self.scenario.setEnabled(available)
+        self.wait_timeout.setEnabled(available)
+        self.launch_app.setEnabled(available)
+        self.stop_app.setEnabled(bool(snap and snap.state == "running" and not pending))
+        self.job_label.setText(
+            "Waiting for Jetson confirmation"
+            if pending
+            else f"{snap.state.capitalize()}  {snap.detail}"
+            if snap
+            else "Waiting for current Jetson status"
+        )
+
     def inspect_images(self):
         st = self.station
         if not self.shown or not st or self.shown != st.review_token():
@@ -455,6 +560,8 @@ class Window(QMainWindow):
         self.event_line("Log directory: " + str(self.log_folder))
         self.radio = Radio(port, self.codec)
         self.station = Station(self.codec, self.radio, self.journal)
+        self.app_snapshot = None
+        self.app_stamp = self.app_received = self.pending_until = 0
         self.track = LocationTrack()
         self.radio.start()
         self.last_rx = None
@@ -468,6 +575,8 @@ class Window(QMainWindow):
             self.journal.log("disconnect", "Operator closed connection")
             self.journal.close()
         self.radio = self.station = self.journal = None
+        self.app_snapshot = None
+        self.pending_until = 0
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -571,6 +680,33 @@ class Window(QMainWindow):
                 topic = data["topic"]
                 try:
                     msg = self.codec.decode(data["payload"], self.radio.engine.topics[topic].type)
+                    if topic == 22:
+                        stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
+                        if (
+                            self.radio.ready
+                            and stamp >= self.track.connected
+                            and stamp > self.app_stamp
+                            and -0.2 <= (time.time_ns() - stamp) / 1e9 < 3
+                        ):
+                            previous = self.app_snapshot
+                            self.app_snapshot, self.app_stamp = msg, stamp
+                            self.app_received = self.last_rx = time.monotonic()
+                            if (
+                                self.pending_until
+                                and msg.job_id == self.pending_job
+                                and (self.pending_op == "start" or msg.state != "running")
+                            ):
+                                self.pending_until = 0
+                            if previous is None or (
+                                previous.job_id,
+                                previous.state,
+                                previous.detail,
+                            ) != (msg.job_id, msg.state, msg.detail):
+                                self.event_line(f"Jetson  ·  {msg.state}  {msg.detail}")
+                                self.journal.log(
+                                    "app_status", msg.detail, state=msg.state, job_id=msg.job_id
+                                )
+                        continue
                     if topic == 20:
                         if self.radio.ready and self.track.accept(msg):
                             self.last_rx = time.monotonic()
@@ -626,6 +762,7 @@ class Window(QMainWindow):
             self.radio.ui_seen = time.monotonic()
         ready = bool(self.radio and self.radio.ready)
         self.update_location(ready)
+        self.update_cockpit(ready)
         st = self.station
         self.port.setEnabled(self.radio is None)
         self.refresh.setEnabled(self.radio is None)
@@ -640,12 +777,12 @@ class Window(QMainWindow):
             elif self.radio.engine.config_match is False:
                 state = "Contract mismatch"
             else:
-                state = "Connecting"
+                state = "Waiting for Jetson"
         if self.link_state != state:
             self.link_state = state
             bg, fg = {
                 "Disconnected": ("#e9eff0", "#476069"),
-                "Connecting": ("#fff1cb", "#754b08"),
+                "Waiting for Jetson": ("#fff1cb", "#754b08"),
                 "Link lost": ("#ffe4de", "#96382d"),
                 "Port unavailable": ("#ffe4de", "#96382d"),
                 "Contract mismatch": ("#ffe4de", "#96382d"),
@@ -657,8 +794,16 @@ class Window(QMainWindow):
         self.start.setText(
             "Retry start" if st and st.state == "awaiting acceptance" else "Start session"
         )
+        adapter_offline = bool(
+            self.app_snapshot
+            and (not self.app_fresh() or not self.app_snapshot.mission_adapter_online)
+        )
+        self.start.setToolTip(
+            "Start the mission adapter on the Jetson first." if adapter_offline else ""
+        )
         self.start.setEnabled(
             ready
+            and not adapter_offline
             and (
                 not st.session
                 or st.state
@@ -695,6 +840,8 @@ class Window(QMainWindow):
         self.status.setText(
             "   ·   ".join(x for x in (st.callsign, st.area, st.state.capitalize(), note) if x)
             if st and st.session
+            else "Jetson idle · mission adapter offline"
+            if ready and adapter_offline
             else "No active session"
         )
         active = st.active if st else ""
@@ -827,7 +974,12 @@ if __name__ == "__main__":
             != location
         ):
             raise RuntimeError("Packaged robot location failed the CDR round trip")
-        if window.submit.isEnabled() or radio.ready:
+        launch = window.codec.types["AppCommand"](
+            window.codec.stamp(), "a" * 32, "start", "scenario", "retry", False
+        )
+        if window.codec.decode(window.codec.encode(launch), radio.engine.topics[21].type) != launch:
+            raise RuntimeError("Packaged app command failed the CDR round trip")
+        if window.launch_app.isEnabled() or window.submit.isEnabled() or radio.ready:
             raise RuntimeError("Disconnected station accepted mission input")
         window.close()
     else:

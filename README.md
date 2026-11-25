@@ -41,6 +41,14 @@ The footer shows the build ID and wire map version. **Copy diagnostics** copies 
 
 **Review** opens when evidence for the active target is ready. **View original images** shows the received JPEG previews at their native resolution. **Activity** timestamps events in UTC and **Open folder** opens the connection journal. The radio indicator distinguishes connecting, a missing port, a contract mismatch, and loss of an established link.
 
+## Jetson apps and instruments
+
+Use the matching wire v5 desktop build. **Waiting for Jetson** means the GS is waiting for the peer handshake or heartbeat warm-up. **Contract mismatch** means both radios exchanged a handshake and the applications use different topic maps.
+
+The Jetson boots into an idle radio service. On the **Jetson** tab choose **Nav2 mission** for the 2D navigation demo, or **FSM regression scenario** for a named scenario with optional operator timeout. Click **Run simulation** and watch for the Jetson’s running and terminal states. **Stop simulation** stops that job. Loss of the GS lease also ends it. Job output stays on the Jetson in `evidence-run/<job_id>/`. Simulation uses its own network and devices.
+
+The instruments show reported battery percentage, E-stop input and true heading. A dash means unavailable or stale. **Start session** uses the separately commissioned mission adapter. The idle service reports whether that adapter is online. Session controls and simulation controls have separate lifecycles.
+
 ## Logs and recovery
 
 Each connection creates a folder under `logs/` beside the source or, for packaged apps, in the user’s application data directory. The window prints the full path on connection. `console.log` records radio and mission events in UTC. `events.jsonl` includes elapsed time, typed message fields, evidence IDs, operator requests, local send results, radio ACKs and retry counts. JPEGs are checked against the received SHA-256 and saved as `evidence/<preview_sha256>.jpg`. A transport ACK means the remote bridge received the bytes. Mission acceptance comes from a UGV report.
@@ -49,7 +57,7 @@ Loss of an established radio link locks the session and stops the GS heartbeat. 
 
 ## Integration
 
-`radio.py` uses the upstream Python transport and reliability engine pinned in `requirements.txt`. The app reads wire-map v4 settings and registers the checked-in ROS message definitions with the rosbags Jazzy CDR codec. The production UGV gateway and FSM own task acceptance, movement and cleaning. The paired UGV sends one latest-only position per second at most, including before a mission. Incoming fixes and headings are saved in the connection journal. Compatibility depends on both the topic ID/type map and the exact message definitions. Update the contract and rerun the codec and bench checks when either changes.
+`radio.py` uses the upstream Python transport and reliability engine pinned in `requirements.txt`. The app reads wire-map v5 settings and registers the checked-in ROS message definitions with the rosbags Jazzy CDR codec. The production UGV gateway and FSM own task acceptance, movement and cleaning. The paired UGV sends one latest-only position per second at most, including before a mission. Incoming fixes and headings are saved in the connection journal. Compatibility depends on both the topic ID/type map and the exact message definitions. Update the contract and rerun the codec and bench checks when either changes.
 
 The online map uses the OpenStreetMap standard tile service. Only visible tiles are fetched. Application cache storage is bounded. Internet is required for uncached tiles. [Tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
 

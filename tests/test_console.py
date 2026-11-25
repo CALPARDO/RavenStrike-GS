@@ -295,10 +295,41 @@ def test_copy_diagnostics_without_radio(window):
     text = QApplication.clipboard().text()
     for value in (
         window.build,
-        "Wire map v4",
+        "Wire map v5",
         "Port: COM14",
         "Disconnected",
         "no connection yet",
     ):
         assert value in text
     assert window.radio is None
+
+
+def test_jetson_instruments_and_stale_app_controls(window, monkeypatch):
+    w = window
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    sent = []
+    monkeypatch.setattr(gs.Radio, "send", lambda self, topic, msg: sent.append(msg) or 1)
+    w.port.setCurrentText("fixture")
+    w.connect_radio()
+    w.radio.ready = True
+    msg = w.codec.types["AppStatus"](w.codec.stamp(), "", "", "idle", "", 75, 1, False)
+    w.radio.receive(22, w.codec.encode(msg))
+    w.tick()
+    assert not w.start.isEnabled() and w.launch_app.isEnabled()
+    assert [widget.text() for widget in w.instruments] == ["75%", "Active", "—"]
+    w.app_choice.setCurrentIndex(w.app_choice.findData("scenario"))
+    w.scenario.setCurrentText("retry")
+    w.wait_timeout.setChecked(True)
+    w.launch_app.click()
+    assert len(sent) == 1 and sent[0].scenario == "retry" and sent[0].wait_timeout
+    assert not w.launch_app.isEnabled() and not w.stop_app.isEnabled()
+    msg.job_id, msg.state, msg.stamp = sent[0].request_id, "running", w.codec.stamp()
+    w.radio.receive(22, w.codec.encode(msg))
+    w.tick()
+    assert w.stop_app.isEnabled() and not w.launch_app.isEnabled()
+    w.app_received -= 4
+    w.tick()
+    assert not w.launch_app.isEnabled() and not w.stop_app.isEnabled()
+    assert [widget.text() for widget in w.instruments] == ["—"] * 3
+    w.disconnect()
