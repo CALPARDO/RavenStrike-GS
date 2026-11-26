@@ -35,6 +35,7 @@ if sys.argv[1] == "source":
         node.destroy_node()
         rclpy.try_shutdown()
 else:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     from gs import Window
@@ -51,7 +52,7 @@ else:
         while time.monotonic() < until:
             app.processEvents()
             actual = tuple(
-                w.health_panel.rows[name].property("level")
+                w.health_panel.rows[name].data(Qt.ItemDataRole.UserRole)
                 for name in ("GNSS", "Battery", "E-stop")
             )
             if w.app_fresh() and actual == (gnss, battery, estop):

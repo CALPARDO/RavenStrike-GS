@@ -56,9 +56,11 @@ try:
     wait(w.stop_app.isEnabled)
     wait(lambda: len(w.sim_view.plot.trace["fixes"]) >= 3 and any(x or y for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 60)
     print("PASS received changing Nav2 simulation position and FSM over serial", flush=True)
-    w.stop_app.click()
+    assert w.stop_app.action in w.stop_menu.actions()
+    w.stop_app.action.trigger()
     wait(lambda: w.app_snapshot.state == "stopped")
-    print("PASS operator stop", flush=True)
+    assert w.radio.ready and w.launch_app.isEnabled()
+    print("PASS header simulation stop confirmed; radio still ready", flush=True)
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
     running = w.app_snapshot.job_id

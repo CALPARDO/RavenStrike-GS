@@ -87,6 +87,9 @@ def field_theme(app):
         QPushButton:hover { background: #edf5f4; }
         QPushButton#primary { background: #09685f; color: white; border-color: #09685f; }
         QPushButton#primary:hover { background: #07564e; }
+        QPushButton#stopMenu { background: #a2312c; color: white; border: 1px solid #bd5149; padding-right: 22px; }
+        QPushButton#stopMenu:hover { background: #8c2623; }
+        QPushButton#stopMenu:disabled { background: #46585e; color: #c6d0d3; border-color: #647378; }
         QPushButton#abort { color: #9a332c; background: #fff6f3; border-color: #d6a198; }
         QPushButton:pressed { background: #daebe9; }
         QPushButton:disabled, QPushButton#primary:disabled, QPushButton#abort:disabled { background: #f3f5f5; color: #738489; border-color: #dce3e4; }

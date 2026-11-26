@@ -158,8 +158,17 @@ def test_session_controls_and_reported_queue(window, monkeypatch):
     assert sent[-1][1].command == "scan_complete" and not w.submit.isEnabled()
     receive(scanned=True)
     assert w.scan.text() == "Scanning closed"
-    w.abort.click()
+    assert w.stop_menu.actions()[1] is w.halt
+    w.abort.trigger()
     assert sent[-1][1].command == "abort" and not w.abort.isEnabled()
+    assert w.halt.isEnabled()
+    w.halt.trigger()
+    assert sent[-1][0] == 5 and sent[-1][1].command == "cancel"
+    assert not w.halt.isEnabled() and w.radio.ready
+    count = len(sent)
+    w.halt.trigger()
+    assert len(sent) == count
+    assert "awaiting robot status" in w.feedback.text()
     w.disconnect()
     assert w.tasks.rowCount() == 0 and not w.runway.targets and w.runway.center == SITE
 
@@ -430,8 +439,11 @@ def test_health_colors_and_stale_reset(window):
         0,
         (1 << kind.NAV2) | (2 << kind.ODOMETRY) | (3 << kind.GNSS),
     )
+    assert panel.rowCount() == 12 and panel.columnCount() == 2
+    assert panel.item(0, 0).text() == "Radio"
     panel.display("Radio ready", msg)
-    assert [panel.rows[n].property("level") for n in ("Nav2", "Odometry", "GNSS", "Cleaning")] == [
+    assert panel.item(0, 1).text() == "Ready"
+    assert [panel.rows[n].data(Qt.ItemDataRole.UserRole) for n in ("Nav2", "Odometry", "GNSS", "Cleaning")] == [
         1,
         2,
         3,
@@ -439,8 +451,8 @@ def test_health_colors_and_stale_reset(window):
     ]
     assert panel.summary() == "Check E-stop, GNSS, Battery, Odometry"
     panel.display("Link lost", None)
-    assert panel.rows["Radio"].property("level") == 3
-    assert all(w.property("level") == 0 for n, w in panel.rows.items() if n != "Radio")
+    assert panel.rows["Radio"].data(Qt.ItemDataRole.UserRole) == 3
+    assert all(w.data(Qt.ItemDataRole.UserRole) == 0 for n, w in panel.rows.items() if n != "Radio")
 
 
 def test_fsm_tab_follows_radio_and_clears_on_loss(window, monkeypatch):
@@ -532,7 +544,7 @@ def test_workspace_map_selection_and_shared_actions(window, monkeypatch):
     w.restore_layout()
     assert w.tabs.currentWidget() is w.map_page
     mission = next(m.menu() for m in w.menuBar().actions() if m.text() == "&Mission")
-    assert mission.actions() == [b.action for b in (w.start, w.add_target, w.scan, w.abort)]
+    assert mission.actions() == [w.start.action, w.add_target.action, w.scan.action, w.halt, w.abort]
     for action in mission.actions():
         assert not action.isEnabled()
     assert w.station is None

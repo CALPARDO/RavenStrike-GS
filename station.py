@@ -58,6 +58,7 @@ class Station:
         self.home = ()
         self.queue = []
         self.scanned = self.scanning_requested = self.abort_requested = self.review = False
+        self.cancel_requested_at = None
         self.last_status = -1
         self.records = {}
         self.image_times = {}
@@ -97,7 +98,7 @@ class Station:
 
     @property
     def operating(self):
-        return self.state in ("standby", "working", "returning") and not self.abort_requested
+        return self.state in ("standby", "working", "returning") and not self.abort_requested and self.cancel_requested_at is None
 
     def send(self, topic, msg, detail):
         self.journal.log("operator_request", detail, topic=topic, message=contents(msg))
@@ -132,8 +133,17 @@ class Station:
             "Operator retried start for " + self.session,
         )
 
+    @property
+    def can_halt(self):
+        return (bool(self.session) and self.state in ("working", "returning", "standby")
+                and (self.cancel_requested_at is None or time.monotonic() - self.cancel_requested_at >= 3))
+
     def command(self, command):
-        if not self.operating or command not in ("scan_complete", "abort"):
+        if command == "cancel":
+            allowed = self.can_halt
+        else:
+            allowed = self.operating and command in ("scan_complete", "abort")
+        if not allowed:
             raise ValueError("Session cannot accept this command.")
         if command == "scan_complete" and (self.scanned or self.scanning_requested):
             raise ValueError("Scanning completion already sent.")
@@ -144,6 +154,8 @@ class Station:
         )
         if command == "scan_complete":
             self.scanning_requested = True
+        elif command == "cancel":
+            self.cancel_requested_at = time.monotonic()
         else:
             self.abort_requested = True
 

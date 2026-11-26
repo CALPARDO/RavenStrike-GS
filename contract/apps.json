@@ -1,7 +1,7 @@
 {
   "nav2-demo": {"label": "Nav2 mission", "scenarios": [], "defaults": {}},
   "scenario": {
-    "label": "FSM regression scenario",
+    "label": "FSM regression · production Nav2",
     "scenarios": ["nominal", "retry", "false-positive", "invalid-depth", "stale", "missing-tf", "nav-rejected", "nav-failed", "clean-failed", "heartbeat-loss", "abort"],
     "defaults": {"scenario": "nominal", "wait_timeout": false}
   }

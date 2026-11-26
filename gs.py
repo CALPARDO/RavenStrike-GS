@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -147,9 +148,9 @@ class ActivityLog(QPlainTextEdit):
 class CommandButton(QPushButton):
     """One action for the button, menu and keyboard shortcut."""
 
-    def __init__(self, text, parent):
-        super().__init__(text)
-        self.action = QAction(text, parent)
+    def __init__(self, action):
+        super().__init__(action.text())
+        self.action = action
         self.clicked.connect(self.action.trigger)
 
     def setIcon(self, icon):
@@ -200,6 +201,12 @@ class Window(QMainWindow):
         self.link.setObjectName("link")
         self.link.setIcon(icon("radio"))
         self.link.setToolTip("Open radio connection settings")
+        self.stops = QPushButton(icon("stop"), "Stop controls")
+        self.stops.setObjectName("stopMenu")
+        self.stops.setAccessibleName("Mission and simulation stop controls")
+        self.stop_menu = QMenu(self.stops)
+        self.stops.setMenu(self.stop_menu)
+        bar.addWidget(self.stops)
         shell.addWidget(header)
         self.settings = QSettings("RavenStrike", "FieldConsole")
         self.draft = None
@@ -308,6 +315,7 @@ class Window(QMainWindow):
 
         drawer = QDialog(self)
         drawer.setWindowTitle("Subsystem health")
+        drawer.resize(370, 440)
         details = QVBoxLayout(drawer)
         self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
         details.addWidget(self.health_panel)
@@ -401,12 +409,14 @@ class Window(QMainWindow):
             "Scanning complete",
             lambda: self.confirm("scan_complete", "Finish scanning and drain the queue?"),
         )
-        self.abort = self.button(
-            column,
-            "Abort to base",
+        self.halt = self.command_action(
+            "Halt field mission in place",
+            lambda: self.confirm("cancel", "Halt the field mission here and retain unfinished targets?"),
+        )
+        self.abort = self.command_action(
+            "Abort field mission and return to base",
             lambda: self.confirm("abort", "Request abort and return to base?"),
         )
-        self.abort.setObjectName("abort")
         self.abort.setIcon(icon("return"))
         self.scan_state = label("Scanning closed", "closed")
         row.addWidget(self.scan_state)
@@ -540,6 +550,13 @@ class Window(QMainWindow):
         layout.addLayout(actions)
         self.launch_app = self.button(actions, "Run simulation", lambda: self.app_command("start"))
         self.stop_app = self.button(actions, "Stop simulation", lambda: self.app_command("stop"))
+        self.stop_menu.addSection("Field robot")
+        self.stop_menu.addAction(self.halt)
+        self.stop_menu.addAction(self.abort)
+        self.stop_menu.addAction(self.scan.action)
+        self.stop_menu.addAction("Hardware E-stop · physical control only").setEnabled(False)
+        self.stop_menu.addSection("Jetson simulation")
+        self.stop_menu.addAction(self.stop_app.action)
         self.job_label = label("", "muted")
         self.job_label.setWordWrap(True)
         layout.addWidget(self.job_label)
@@ -586,8 +603,8 @@ class Window(QMainWindow):
         action(view, "Restore default layout", self.restore_layout)
 
         mission = self.menuBar().addMenu("&Mission")
-        for button in (self.start, self.add_target, self.scan, self.abort):
-            mission.addAction(button.action)
+        for item in (self.start.action, self.add_target.action, self.scan.action, self.halt, self.abort):
+            mission.addAction(item)
         self.add_target.action.setShortcut("Ctrl+N")
 
         tools = self.menuBar().addMenu("&Tools")
@@ -906,8 +923,8 @@ class Window(QMainWindow):
         self.feedback.setText(self.runway.target_name.in_text(text))
         self.feedback.setToolTip(text)
 
-    def button(self, row, name, fn):
-        button = CommandButton(name, self)
+    def command_action(self, name, fn):
+        action = QAction(name, self)
 
         def invoke():
             try:
@@ -919,7 +936,11 @@ class Window(QMainWindow):
                 if self.journal:
                     self.journal.log("operator_error", str(err))
 
-        button.action.triggered.connect(invoke)
+        action.triggered.connect(invoke)
+        return action
+
+    def button(self, row, name, fn):
+        button = CommandButton(self.command_action(name, fn))
         row.addWidget(button)
         return button
 
@@ -1066,7 +1087,8 @@ class Window(QMainWindow):
             self.event_line(
                 "Scanning complete requested"
                 if command == "scan_complete"
-                else "Abort to base requested"
+                else "Halt requested · awaiting robot status" if command == "cancel"
+                else "Return to base requested · awaiting robot status"
             )
             self.tick()
 
@@ -1374,8 +1396,10 @@ class Window(QMainWindow):
         self.scan_state.setVisible(closed)
         self.scan.setVisible(bool(st and st.operating and not closed))
         self.add_target.setVisible(bool(st and st.operating and not closed))
-        self.abort.setEnabled(bool(ready and st.operating))
-        self.abort.setVisible(bool(st and (st.operating or st.abort_requested)))
+        self.stops.setVisible(self.radio is not None)
+        self.stops.setEnabled(ready)
+        self.halt.setEnabled(bool(ready and st.can_halt))
+        self.abort.setEnabled(bool(ready and st.operating and st.state != "returning"))
         scanning = bool(ready and st.operating and not st.scanned and not st.scanning_requested)
         self.scan.setText(
             "Scanning closed"
@@ -1384,7 +1408,7 @@ class Window(QMainWindow):
             if st and st.scanning_requested
             else "Scanning complete"
         )
-        self.abort.setText("Abort requested" if st and st.abort_requested else "Abort to base")
+        self.abort.setText("Return requested" if st and st.abort_requested else "Abort field mission and return to base")
         self.add_target.setEnabled(scanning)
         self.scan.setEnabled(scanning)
         self.submit.setEnabled(

@@ -1,7 +1,13 @@
 """Operator indications. All onboard states come from one latest-only status frame."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QLabel, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
+)
 
 # Text describes the evidence each green indication actually represents.
 PROBES = (
@@ -28,14 +34,22 @@ COLORS = (
 )
 
 
-class HealthPanel(QWidget):
+class HealthPanel(QTableWidget):
     def __init__(self, status_type):
         super().__init__()
         self.status_type = status_type
         self.rows = {}
-        layout = QGridLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        self.setColumnCount(2)
+        self.setHorizontalHeaderLabels(["Subsystem", "Status"])
+        self.setAccessibleName("Subsystem health table")
+        self.verticalHeader().hide()
+        self.verticalHeader().setDefaultSectionSize(27)
+        self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setAlternatingRowColors(True)
+        self.setShowGrid(False)
         names = [
             ("Radio", "Ground station radio lease"),
             ("Jetson", "Field supervisor status"),
@@ -43,24 +57,28 @@ class HealthPanel(QWidget):
             ("E-stop", "Reported emergency-stop input"),
         ]
         names.extend((name, tip) for _, name, _, _, tip in PROBES)
+        self.setRowCount(len(names))
         for index, (name, tip) in enumerate(names):
-            widget = QLabel()
-            widget.setToolTip(tip)
-            layout.addWidget(widget, index // 2, index % 2, Qt.AlignmentFlag.AlignLeft)
-            self.rows[name] = widget
+            title = QTableWidgetItem(name)
+            status = QTableWidgetItem()
+            title.setToolTip(tip)
+            status.setToolTip(tip)
+            self.setItem(index, 0, title)
+            self.setItem(index, 1, status)
+            self.rows[name] = status
             self.indicate(name, 0, "Unknown")
 
     def indicate(self, name, level, state):
-        widget = self.rows[name]
-        text = f"{name} · {state}"
-        if widget.text() != text or widget.property("level") != level:
-            widget.setText(text)
-            widget.setProperty("level", level)
+        cell = self.rows[name]
+        if cell.text() != state or cell.data(Qt.ItemDataRole.UserRole) != level:
+            cell.setText(state)
+            cell.setData(Qt.ItemDataRole.UserRole, level)
             bg, fg = COLORS[level]
-            widget.setStyleSheet(f"background:{bg};color:{fg};border-radius:4px;padding:3px 6px;")
+            cell.setBackground(QColor(bg))
+            cell.setForeground(QColor(fg))
 
     def summary(self):
-        levels = {name: row.property("level") for name, row in self.rows.items()}
+        levels = {name: row.data(Qt.ItemDataRole.UserRole) for name, row in self.rows.items()}
         faults = [name for name, level in levels.items() if level == 3]
         warnings = [name for name, level in levels.items() if level == 2]
         if faults or warnings:
