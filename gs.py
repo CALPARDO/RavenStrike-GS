@@ -574,7 +574,7 @@ class Window(QMainWindow):
         self.launch_app = self.button(layout, "Run mission", lambda: self.app_command("start"))
         self.launch_app.setObjectName("primary")
         self.stop_app = self.button(layout, "Stop simulation", lambda: self.app_command("stop"))
-        self.stop_app.setObjectName("abort")
+        self.stop_app.setObjectName("stopSimulation")
         self.stop_app.setIcon(icon("stop"))
         layout.addWidget(label("Job status", "section"))
         self.job_label = label("", "muted")

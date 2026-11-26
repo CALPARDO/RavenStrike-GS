@@ -978,3 +978,18 @@ def test_simulation_layout_is_bounded_and_reset_per_job(window):
     assert not view.accept_scene("scene1:" + json.dumps([42, *data[1:]]))
     view.reset()
     assert view.seed is None and not view.plot.targets and not view.plot.barriers
+
+
+
+def test_sim_map_obstacles_share_track_projection(window):
+    window.sim_button.click()
+    plot = window.sim_view.plot
+    plot.setFixedSize(600, 480)
+    plot.bounds = [-8, 8, -8, 8]
+    plot.barriers = [[-6, 3, -4, 5], [3, -5, 5, -3]]
+    image = plot.grab().toImage()
+    # At 25 px/m, (-5,+4) and (+4,-4) land on opposite sides of base.
+    ratio = image.devicePixelRatio()
+    for x, y in ((175, 140), (400, 340)):
+        assert image.pixelColor(round(x * ratio), round(y * ratio)).name() == "#ded0b8"
+    assert image.pixelColor(round(305 * ratio), round(245 * ratio)).name() != "#ded0b8"

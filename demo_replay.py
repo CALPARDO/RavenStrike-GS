@@ -47,10 +47,12 @@ class GroundTrack(QWidget):
             (self.width() - 110) / max(1, east - west), (self.height() - 80) / max(1, north - south)
         )
 
+        center_x, center_y = (west + east) / 2, (south + north) / 2
+
         def project(x, y):
             return QPointF(
-                self.width() / 2 + (x - (west + east) / 2) * scale,
-                self.height() / 2 - (y - (south + north) / 2) * scale,
+                self.width() / 2 + (x - center_x) * scale,
+                self.height() / 2 - (y - center_y) * scale,
             )
 
         origin = project(0, 0)
@@ -69,8 +71,8 @@ class GroundTrack(QWidget):
             p.drawText(self.width() - 97, 22, "Sim obstacle")
         p.setPen(QPen(QColor("#b5986b"), 1))
         p.setBrush(QColor("#ded0b8"))
-        for west, south, east, north in self.barriers:
-            p.drawRect(QRectF(project(west, north), project(east, south)))
+        for xmin, ymin, xmax, ymax in self.barriers:
+            p.drawRect(QRectF(project(xmin, ymax), project(xmax, ymin)))
         for i, xy in enumerate(self.targets, 1):
             point = project(*xy)
             p.setPen(QPen(QColor("#576b74"), 1))

@@ -48,14 +48,16 @@ try:
     wait(w.stop_app.isEnabled)
     wait(lambda: w.sim_view.seed == 952741458 and w.sim_view.stamp > 0, 45)
     assert w.sim_view.plot.targets and w.sim_view.plot.barriers and w.runway.robot is None
+    wait(lambda: any(x*x + y*y > 9 for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 120)
+    w.show()
+    if not w.grab().save(str(w.journal.folder / "simulation-workspace.png")):
+        raise AssertionError("Could not save the simulation workspace capture")
     wait(lambda: w.app_snapshot.state in ("finished", "failed"), 600)
     assert w.app_snapshot.state == "finished", w.app_snapshot.detail
     print("PASS seeded Nav2 mission completed", w.app_snapshot.detail, flush=True)
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
     wait(lambda: len(w.sim_view.plot.trace["fixes"]) >= 3 and any(x or y for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 60)
-    w.show()
-    w.grab().save(str(w.journal.folder / "simulation-workspace.png"))
     print("PASS received changing Nav2 simulation position and FSM over serial", flush=True)
     w.stop_app.click()
     wait(lambda: w.app_snapshot.state == "stopped")
