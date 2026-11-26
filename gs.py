@@ -47,12 +47,13 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 from serial.tools import list_ports
 
-from appearance import field_theme
+from appearance import field_theme, icon
 from demo_replay import DemoReplay
 from demo_site import SITE, SITE_ZOOM, demo_obstacles
 from display import eastern
@@ -151,6 +152,10 @@ class CommandButton(QPushButton):
         self.action = QAction(text, parent)
         self.clicked.connect(self.action.trigger)
 
+    def setIcon(self, icon):
+        self.action.setIcon(icon)
+        super().setIcon(icon)
+
     def setEnabled(self, enabled):
         self.action.setEnabled(bool(enabled))
         super().setEnabled(bool(enabled))
@@ -193,6 +198,8 @@ class Window(QMainWindow):
         self.link = self.button(bar, "Disconnected", lambda: self.radio_dialog.show())
         self.link.setAccessibleName("Radio connection status and settings")
         self.link.setObjectName("link")
+        self.link.setIcon(icon("radio"))
+        self.link.setToolTip("Open radio connection settings")
         shell.addWidget(header)
         self.settings = QSettings("RavenStrike", "FieldConsole")
         self.draft = None
@@ -217,20 +224,14 @@ class Window(QMainWindow):
         workspace = QVBoxLayout(body)
         workspace.setContentsMargins(12, 8, 12, 8)
         workspace.setSpacing(8)
-        self.mission_panel(workspace)
-        telemetry = QFrame()
-        self.telemetry_strip = telemetry
-        telemetry.setObjectName("telemetry")
-        self.telemetry_bar = QHBoxLayout(telemetry)
-        self.telemetry_bar.setContentsMargins(12, 3, 8, 3)
-        workspace.addWidget(telemetry)
+        self.build_telemetry(workspace)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         workspace.addWidget(self.splitter, 1)
         self.tabs = QTabWidget()
         self.splitter.addWidget(self.tabs)
         self.map_page = QWidget()
-        self.tabs.addTab(self.map_page, "Mission map")
+        self.tabs.addTab(self.map_page, icon("map"), "Mission map")
         self.map_panel(QVBoxLayout(self.map_page))
         inspector = QFrame()
         inspector.setObjectName("card")
@@ -273,6 +274,55 @@ class Window(QMainWindow):
         self.tick()
         self.resize(1280, 735)
 
+    def build_telemetry(self, workspace):
+        self.telemetry_strip = QFrame()
+        self.telemetry_strip.setObjectName("telemetry")
+        workspace.addWidget(self.telemetry_strip)
+        meters = QHBoxLayout(self.telemetry_strip)
+        meters.setContentsMargins(12, 4, 10, 4)
+        meters.setSpacing(8)
+        self.instruments = []
+        for name in ("Battery", "E-stop", "Heading"):
+            if self.instruments:
+                separator = QFrame()
+                separator.setFrameShape(QFrame.Shape.VLine)
+                separator.setObjectName("rule")
+                meters.addWidget(separator)
+            meters.addWidget(label(name, "field"))
+            value = label("—", "meter")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setMinimumWidth(34)
+            meters.addWidget(value)
+            self.instruments.append(value)
+        self.health_summary = label("", "muted")
+        self.health_summary.setWordWrap(True)
+        self.health_summary.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        meters.addWidget(self.health_summary, 1)
+        self.health_action = QAction(icon("health"), "Subsystem health", self)
+        self.health_action.setCheckable(True)
+        self.health_details = QToolButton()
+        self.health_details.setObjectName("healthToggle")
+        self.health_details.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.health_details.setDefaultAction(self.health_action)
+        meters.addWidget(self.health_details)
+
+        drawer = QFrame()
+        drawer.setObjectName("card")
+        workspace.addWidget(drawer)
+        details = QVBoxLayout(drawer)
+        heading = QHBoxLayout()
+        details.addLayout(heading)
+        heading.addWidget(label("Subsystem health", "heading"))
+        heading.addStretch()
+        close = QPushButton("Close")
+        close.setAccessibleName("Close subsystem health")
+        close.clicked.connect(lambda: self.health_action.setChecked(False))
+        heading.addWidget(close)
+        self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
+        details.addWidget(self.health_panel)
+        self.health_action.toggled.connect(drawer.setVisible)
+        drawer.hide()
+
     def map_panel(self, column):
         pane = column
         bar = QHBoxLayout()
@@ -286,6 +336,8 @@ class Window(QMainWindow):
         self.runway.targetPicked.connect(self.select_target)
         self.locate = self.button(bar, "Locate UGV", self.locate_robot)
         self.fit_route = self.button(bar, "Fit route", self.fit_targets)
+        self.locate.setIcon(icon("locate"))
+        self.fit_route.setIcon(icon("fit"))
         for control in (self.locate, self.fit_route):
             control.setObjectName("mapTool")
         pane.addWidget(self.runway, 1)
@@ -303,37 +355,6 @@ class Window(QMainWindow):
         self.clear_track.setObjectName("mapTool")
         self.clear_track.setToolTip("Clear the displayed GPS trail. New fixes start a new trail.")
 
-        meters = self.telemetry_bar
-        meters.setSpacing(8)
-        self.instruments = []
-        for name in ("Battery", "E-stop", "Heading"):
-            meters.addWidget(label(name, "field"))
-            value = label("—", "meter")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setMinimumWidth(34)
-            meters.addWidget(value)
-            separator = QFrame()
-            separator.setFrameShape(QFrame.Shape.VLine)
-            separator.setObjectName("rule")
-            meters.addWidget(separator)
-            self.instruments.append(value)
-        meters.addStretch()
-        self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
-        health_bar = QHBoxLayout()
-        self.telemetry_bar.addLayout(health_bar)
-        self.health_summary = label("", "muted")
-        self.health_summary.setWordWrap(True)
-        health_bar.addWidget(self.health_summary, 1)
-        self.health_details = QPushButton("System details")
-        self.health_details.setObjectName("mapTool")
-        self.health_details.setCheckable(True)
-        health_bar.addWidget(self.health_details)
-        self.health_details.toggled.connect(self.health_panel.setVisible)
-        self.health_details.toggled.connect(
-            lambda checked: self.tabs.setCurrentWidget(self.map_page) if checked else None
-        )
-        pane.addWidget(self.health_panel)
-        self.health_panel.hide()
         self.draft_dialog = QDialog(self)
         self.draft_dialog.setWindowTitle("Add FOD location")
         pane = QVBoxLayout(self.draft_dialog)
@@ -365,41 +386,42 @@ class Window(QMainWindow):
         self.submit.setObjectName("primary")
 
     def mission_panel(self, column):
+        self.status = label("No active session", "muted")
+        self.status.setWordWrap(True)
+        column.addWidget(self.status)
+        self.phase_readout = label("", "phase")
+        column.addWidget(self.phase_readout)
+        self.active_target = label("", "muted")
+        self.active_target.setWordWrap(True)
+        column.addWidget(self.active_target)
         row = QHBoxLayout()
         column.addLayout(row)
-        self.status = label("No active session", "heading")
-        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        row.addWidget(self.status, 2)
-        self.active_target = label("", "muted")
-        self.active_target.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        row.addWidget(self.active_target, 1)
-        self.idle_connect = self.button(row, "Connect radio…", self.radio_dialog.show)
-        self.idle_connect.setObjectName("primary")
         self.start = self.button(row, "Start session", self.start_session)
         self.start.setObjectName("primary")
         self.add_target = self.button(row, "Add FOD…", self.open_draft)
         self.add_target.setObjectName("targetAction")
+        self.add_target.setIcon(icon("target"))
         self.scan = self.button(
             row,
             "Scanning complete",
             lambda: self.confirm("scan_complete", "Finish scanning and drain the queue?"),
         )
         self.abort = self.button(
-            row,
+            column,
             "Abort to base",
             lambda: self.confirm("abort", "Request abort and return to base?"),
         )
         self.abort.setObjectName("abort")
+        self.abort.setIcon(icon("return"))
         self.scan_state = label("Scanning closed", "closed")
-        row.insertWidget(row.indexOf(self.abort), self.scan_state)
+        row.addWidget(self.scan_state)
 
     def activity_panel(self, column):
         pane = column
         pane.setContentsMargins(14, 12, 14, 12)
-        self.inspector = label("Mission inspector", "heading")
+        self.inspector = label("Mission control", "heading")
         pane.addWidget(self.inspector)
-        self.phase_readout = label("", "phase")
-        pane.addWidget(self.phase_readout)
+        self.mission_panel(pane)
         self.queue_caption = label("Target register", "section")
         pane.addWidget(self.queue_caption)
         self.tasks = QTableWidget(0, 2)
@@ -436,7 +458,6 @@ class Window(QMainWindow):
         pane.addWidget(self.timeline)
         self.tasks.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tasks.currentItemChanged.connect(self.update_timeline)
-        pane.addStretch(1)
         self.open_review = self.button(pane, "Open operator review", self.show_review)
         self.open_review.setObjectName("reviewAction")
         self.review_page = QDialog(self)
@@ -483,9 +504,9 @@ class Window(QMainWindow):
         for button in self.review_page.findChildren(QPushButton):
             button.setAutoDefault(False)
         self.fsm_panel = FsmPanel(self.codec.types["FieldStatus"])
-        self.tabs.addTab(self.fsm_panel, "State machine")
+        self.tabs.addTab(self.fsm_panel, icon("flow"), "State machine")
         activity = self.activity = QWidget()
-        self.tabs.addTab(activity, "Activity")
+        self.tabs.addTab(activity, icon("log"), "Activity")
         pane = QVBoxLayout(activity)
         bar = QHBoxLayout()
         pane.addLayout(bar)
@@ -569,7 +590,7 @@ class Window(QMainWindow):
 
         tools = self.menuBar().addMenu("&Tools")
         action(tools, "Radio connection…", self.radio_dialog.show)
-        action(tools, "Subsystem health", self.show_health)
+        tools.addAction(self.health_action)
         action(tools, "Jetson simulations…", self.apps_dialog.show)
         action(tools, "Preferences…", self.preferences).setMenuRole(
             QAction.MenuRole.PreferencesRole
@@ -651,11 +672,7 @@ class Window(QMainWindow):
         self.tabs.setCurrentWidget(self.map_page)
         self.splitter.setSizes([900, 350])
         self.follow.setChecked(self.settings.value("follow", False, type=bool))
-        self.health_details.setChecked(False)
-
-    def show_health(self):
-        self.tabs.setCurrentWidget(self.map_page)
-        self.health_details.setChecked(True)
+        self.health_action.setChecked(False)
 
     def clear_gps(self):
         if self.journal:
@@ -805,7 +822,7 @@ class Window(QMainWindow):
             f"RavenStrike GS build {self.build}",
             f"Wire map v{WIRE_MAP_VERSION}",
             f"Port: {self.port.currentText().strip() or 'none selected'}",
-            f"Link: {self.link.text()}",
+            f"Link: {self.link_state}",
             f"Log folder: {self.log_folder or 'no connection yet'}",
         ]
         QApplication.clipboard().setText("\n".join(lines))
@@ -1244,7 +1261,6 @@ class Window(QMainWindow):
         self.fit_route.setEnabled(
             bool(self.runway.targets or tracks.fixes or tracks.ahead or points)
         )
-        self.idle_connect.setVisible(self.radio is None)
         self.demo_button.setEnabled(self.radio is None)
         self.clock.setText(eastern() + " ET")
         callsign = (st.callsign or self.port.currentText()) if ready else ""
@@ -1280,7 +1296,7 @@ class Window(QMainWindow):
                 "Contract mismatch": ("#ffe4de", "#96382d"),
                 "Radio ready": ("#d6f1e8", "#125d4b"),
             }[state]
-            self.link.setText(state)
+            self.link.setText("Connect radio…" if state == "Disconnected" else state)
             self.link.setStyleSheet(f"background: {bg}; color: {fg};")
         self.open_logs.setEnabled(self.log_folder is not None)
         self.start.setText(
@@ -1576,6 +1592,8 @@ if __name__ == "__main__":
             app.processEvents()
             if getattr(sys, "frozen", False) and window.build == "unknown":
                 raise RuntimeError("Packaged build ID is missing")
+            if any(window.tabs.tabIcon(i).pixmap(20, 20).isNull() for i in range(window.tabs.count())):
+                raise RuntimeError("Packaged workspace icons unavailable")
             if window.runway.overview.isNull() or window.runway.layer != "Satellite":
                 raise RuntimeError("Packaged satellite site overview is unavailable")
             if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":

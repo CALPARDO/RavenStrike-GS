@@ -33,7 +33,7 @@ python3 -m venv .venv
 
 ## Operator console
 
-Use **View** or the workspace tabs to switch between the map, state machine and activity log. The right-hand mission inspector appears when a radio is connected. **Follow vehicle** tracks fresh fixes. Panning turns follow off. **Fit route** frames known target coordinates and the last vehicle position. Resize the inspector by dragging its divider. **View → Restore default layout** resets the workspace.
+Use **View** or the workspace tabs to switch between the map, state machine and activity log. After connecting, use **Mission control** on the right to start the session, add targets, close scanning, review a result or abort to base. The target register sits below those commands. **Follow vehicle** tracks fresh fixes. Panning turns follow off. **Fit route** frames known target coordinates and the last vehicle position. Resize the inspector by dragging its divider. **View → Restore default layout** resets the workspace.
 
 **Fit route** zooms to the plan, traveled track and known targets, including metre-scale detail. Blue rings mark Nav2 waypoints. The solid teal line and dots show received GNSS antenna fixes. Both overlays use the same geographic projection. Gaps longer than three seconds break the trail. **Clear track** starts a fresh local trail while retaining the plan, target queue and session journal. The display holds the latest 4,096 fixes. Session recordings can replay both overlays.
 
@@ -59,7 +59,7 @@ The instruments show reported battery percentage, E-stop input and true heading.
 
 ## Local subsystem preview (wire v8)
 
-**System details** expands the subsystem checks. The map shows a one-line summary and names any checks needing attention. The panel uses labeled green, yellow, red and gray indications. Gray means no current report. Green describes the check printed on the tile: the guard is listening, the cleaning server is available, or Nav2 reports active. Those indicators do not certify physical movement or removal. Fresh empty detections are valid perception input. Stale input degrades an observed stream; loss of the Jetson snapshot clears the onboard indications.
+Choose **Subsystem health** in the telemetry bar or **Tools** menu to show or hide the checks on any tab. The panel also has a **Close** button. The telemetry bar names any checks needing attention. The panel uses labeled green, yellow, red and gray indications. Gray means no current report. Green describes the check printed on the tile: the guard is listening, the cleaning server is available, or Nav2 reports active. Those indicators do not certify physical movement or removal. Fresh empty detections are valid perception input. Stale input degrades an observed stream; loss of the Jetson snapshot clears the onboard indications.
 
 The matching gateway replaces the v5 app status (ID 22) with FieldStatus (ID 24). Eight two-bit onboard indications share one unsigned 16-bit field. Existing link, battery and E-stop data supply the other tiles. The idle frame is 72 bytes, up from 68, at up to 1 Hz. Position and heading share a latest-only update capped at 2 Hz. The session journal records matched command ACK turnaround including GS queueing and retries.
 

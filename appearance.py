@@ -1,7 +1,15 @@
 """Qt widget styling shared by the console and its dialogs."""
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap, QPolygonF
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QIcon, QPalette
+
+ASSETS = Path(__file__).resolve().parent / "assets"
+
+
+def icon(name):
+    return QIcon(str(ASSETS / "icons" / f"{name}.svg"))
 
 
 def field_theme(app):
@@ -64,6 +72,8 @@ def field_theme(app):
         QPushButton#targetAction:disabled { color: #778789; background: #f2f4f4; border-color: #d6dfe0; }
         QLabel#section { color: #405961; font-weight: 650; padding-top: 5px; }
         QLabel#closed { background: #e4eceb; color: #445f5d; border-radius: 9px; padding: 3px 9px; }
+        QToolButton#healthToggle { background: white; color: #23434a; border: 1px solid #adbdc0; border-radius: 5px; padding: 4px 8px; }
+        QToolButton#healthToggle:checked { background: #d8eeea; border-color: #41847d; }
         QFrame#telemetry { background: #fff; border: 1px solid #d3dfe0; border-radius: 5px; }
         QPlainTextEdit#timeline { background: #f7f9fa; border: 0; border-left: 2px solid #b6cbce; border-radius: 0; padding-left: 7px; }
         QFrame#rule { color: #c6d2d4; max-height: 16px; }
@@ -86,18 +96,4 @@ def field_theme(app):
         QTableWidget { background: white; alternate-background-color: #f6f9f9; border: 0; }
         QHeaderView::section { background: #f1f5f6; padding: 6px; color: #495f65; border: 0; font-weight: 600; }
     """)
-    mark = QPixmap(96, 96)
-    mark.fill(Qt.GlobalColor.transparent)
-    p = QPainter(mark)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#104c50"))
-    p.drawRoundedRect(0, 0, 96, 96, 20, 20)
-    for color, points in [
-        ("#ffffff", [(13, 26), (52, 40), (69, 27), (83, 32), (71, 38), (48, 70), (42, 51)]),
-        ("#75cbb8", [(18, 42), (38, 52), (44, 70), (31, 59)]),
-    ]:
-        p.setBrush(QColor(color))
-        p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
-    p.end()
-    app.setWindowIcon(QIcon(mark))
+    app.setWindowIcon(QIcon(str(ASSETS / "ravenstrike.svg")))

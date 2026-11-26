@@ -230,7 +230,7 @@ try:
     previous = w.journal.folder
     assert w.link.text() == "Link lost" and w.runway.robot is None
     w.connect_button.click()
-    assert w.link.text() == "Disconnected"
+    assert w.link_state == "Disconnected"
     w.connect_button.click()
     wait(lambda: w.start.isEnabled())
     wait(lambda: w.runway.robot == (40.0, -83.0, 180.0))

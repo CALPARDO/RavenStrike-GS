@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMessageBox, QPushButton
 
 import gs
 from demo_site import DEMO_AREA, SITE, demo_obstacles
@@ -73,7 +73,7 @@ def test_missing_serial_port_is_actionable(window, tmp_path):
     assert w.link.text() == "Port unavailable"
     assert not w.start.isEnabled() and not w.submit.isEnabled()
     w.connect_button.click()
-    assert w.link.text() == "Disconnected" and w.open_logs.isEnabled()
+    assert w.link.text() == "Connect radio…" and w.link_state == "Disconnected" and w.open_logs.isEnabled()
     records = [
         json.loads(line) for line in (w.log_folder / "events.jsonl").read_text().splitlines()
     ]
@@ -399,11 +399,23 @@ def test_offline_replay_and_controls(window, monkeypatch):
 
 def test_health_colors_and_stale_reset(window):
     panel = window.health_panel
-    assert panel.isHidden() and window.health_summary.text() == "Awaiting system status"
+    assert not panel.isVisible() and window.health_summary.text() == "Awaiting system status"
+    tools = next(a.menu() for a in window.menuBar().actions() if a.text() == "&Tools")
+    toggle = next(a for a in tools.actions() if a.text() == "Subsystem health")
+    window.tabs.setCurrentWidget(window.fsm_panel)
+    toggle.trigger()
+    assert panel.isVisible() and window.tabs.currentWidget() is window.fsm_panel
+    toggle.trigger()
+    assert not panel.isVisible()
+    toggle.trigger()
+    close = next(b for b in window.findChildren(QPushButton)
+                 if b.accessibleName() == "Close subsystem health")
+    QTest.mouseClick(close, Qt.MouseButton.LeftButton)
+    assert not panel.isVisible() and not toggle.isChecked()
     window.health_details.click()
-    assert not panel.isHidden()
-    window.health_details.click()
-    assert panel.isHidden()
+    assert panel.isVisible() and toggle.isChecked()
+    window.restore_layout()
+    assert not panel.isVisible() and not window.health_details.isChecked()
     kind = window.codec.types["FieldStatus"]
     msg = kind(
         window.codec.stamp(),
@@ -746,7 +758,7 @@ def test_satellite_startup_and_layer_switch(window):
     view = window.runway
     assert view.layer == "Satellite" and view.center == SITE and view.initial_view
     assert view.overview.width() == 2048 and view.overview.height() == 1536
-    assert view.robot is None and not view.obstacles and window.idle_connect.isVisible()
+    assert view.robot is None and not view.obstacles and window.link.isVisible()
     center = view.grab().toImage()
     colors = {
         center.pixel(x, y)
