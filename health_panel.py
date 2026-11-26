@@ -1,5 +1,7 @@
 """Operator indications. All onboard states come from one latest-only status frame."""
 
+import time
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -8,6 +10,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
 )
+
+from display import eastern
 
 # Text describes the evidence each green indication actually represents.
 PROBES = (
@@ -39,13 +43,20 @@ class HealthPanel(QTableWidget):
         super().__init__()
         self.status_type = status_type
         self.rows = {}
-        self.setColumnCount(2)
-        self.setHorizontalHeaderLabels(["Subsystem", "Status"])
+        self.setColumnCount(5)
+        self.setHorizontalHeaderLabels(["System", "Signal", "Status", "Last observed (ET)", "Value"])
+        self.observed = {}
+        self.values = {}
+        self.field_controls = False
+        self.remote_trigger = False
+        self.waiting_for = ""
+        self.diag_received = 0
         self.setAccessibleName("Subsystem health table")
         self.verticalHeader().hide()
         self.verticalHeader().setDefaultSectionSize(27)
         self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setAlternatingRowColors(True)
@@ -57,14 +68,23 @@ class HealthPanel(QTableWidget):
             ("E-stop", "Reported emergency-stop input"),
         ]
         names.extend((name, tip) for _, name, _, _, tip in PROBES)
+        names.append(("Camera", "Fresh stamped camera calibration stream; image pixels are not inspected"))
+        groups = {"Radio":"Radio", "Jetson":"Controller", "Battery":"Lynx", "E-stop":"Lynx",
+                  "Mission FSM":"FSM", "Nav2":"Controller", "Odometry":"Lynx", "Spatial scan":"LiDAR",
+                  "GNSS":"Lynx", "Perception":"Perception", "Command guard":"Controller",
+                  "Cleaning":"Collector", "Camera":"Perception"}
+        names.sort(key=lambda row: (groups[row[0]], row[0]))
         self.setRowCount(len(names))
         for index, (name, tip) in enumerate(names):
             title = QTableWidgetItem(name)
             status = QTableWidgetItem()
             title.setToolTip(tip)
             status.setToolTip(tip)
-            self.setItem(index, 0, title)
-            self.setItem(index, 1, status)
+            self.setItem(index, 0, QTableWidgetItem(groups[name]))
+            self.setItem(index, 1, title)
+            self.setItem(index, 2, status)
+            self.setItem(index, 3, QTableWidgetItem("—"))
+            self.setItem(index, 4, QTableWidgetItem("—"))
             self.rows[name] = status
             self.indicate(name, 0, "Unknown")
 
@@ -76,6 +96,46 @@ class HealthPanel(QTableWidget):
             bg, fg = COLORS[level]
             cell.setBackground(QColor(bg))
             cell.setForeground(QColor(fg))
+
+    def reset_observations(self):
+        self.observed.clear()
+        self.values.clear()
+        self.diag_received = 0
+        self.field_controls = False
+        self.remote_trigger = False
+        self.waiting_for = ""
+
+    def diagnostics(self, data, ns):
+        if not isinstance(data, list) or len(data) not in (4, 5):
+            return
+        ages, speed, distance, trigger = data[:4]
+        waiting = data[4] if len(data) == 5 else ""
+        if not isinstance(waiting, str) or len(waiting) > 96:
+            return
+        names = ("Mission FSM", "Nav2", "Odometry", "Spatial scan", "GNSS", "Perception",
+                 "Command guard", "Cleaning", "Camera", "Battery", "E-stop")
+        if (not isinstance(ages, list) or len(ages) != len(names)
+                or any(type(age) is not int or not -1 <= age <= 65535 for age in ages)
+                or any(v is not None and (type(v) is not int or abs(v) > 100000) for v in (speed, distance))
+                or type(trigger) is not int or not 0 <= trigger <= 3):
+            return
+        for name, age in zip(names, ages):
+            if 0 <= age < 65535:
+                self.observed[name] = ns / 1e9 - age
+            else:
+                self.observed.pop(name, None)
+        self.diag_received = time.monotonic()
+        self.remote_trigger = bool(trigger & 1)
+        self.field_controls = bool(trigger & 2)
+        self.waiting_for = waiting
+        self.values["Odometry"] = f"{speed / 100:.2f} m/s" if speed is not None and ages[2] in range(4) else "—"
+        self.values["Spatial scan"] = f"{distance / 100:.2f} m nearest" if distance is not None and ages[3] in range(4) else "—"
+
+    def can_pause(self):
+        return self.field_controls and time.monotonic() - self.diag_received < 8
+
+    def can_trigger(self):
+        return self.remote_trigger and time.monotonic() - self.diag_received < 8
 
     def summary(self):
         levels = {name: row.data(Qt.ItemDataRole.UserRole) for name, row in self.rows.items()}
@@ -114,6 +174,24 @@ class HealthPanel(QTableWidget):
         self.indicate(
             "E-stop", {0: 1, 1: 3}.get(stop, missing_level), {0: "Released", 1: "Active"}.get(stop, "No data" if snap else "Unknown")
         )
+        if snap:
+            self.observed["Jetson"] = snap.stamp.sec + snap.stamp.nanosec / 1e9
+        camera_time = self.observed.get("Camera")
+        camera_ok = bool(snap and camera_time and time.time() - camera_time < 8)
+        self.indicate("Camera", 1 if camera_ok else 2 if snap and camera_time else 0,
+                      "Calibration stream" if camera_ok else "Stale" if snap and camera_time else "No report")
+        self.values["Battery"] = f"{battery}%" if known else "—"
+        self.values["E-stop"] = {0:"Released", 1:"Active"}.get(stop, "—")
+        for name, cell in self.rows.items():
+            observed = self.observed.get(name)
+            value = self.values.get(name, "—") if snap else "—"
+            if name in ("Spatial scan", "Odometry") and time.monotonic() - self.diag_received >= 8:
+                value = "—"
+            for col, text in ((3, eastern(observed) if observed else "—"), (4, value)):
+                item = self.item(cell.row(), col)
+                if item.text() != text:
+                    item.setText(text)
+                    item.setToolTip(text)
         for key, name, good, fault, _ in PROBES:
             state = (snap.health >> getattr(self.status_type, key)) & 3 if snap else 0
             warning = "Not ready" if key == "NAV2" else "Degraded"

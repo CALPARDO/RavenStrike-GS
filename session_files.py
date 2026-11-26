@@ -1,5 +1,6 @@
 """Read-only GS journal playback and evidence export."""
 
+import gzip
 import json
 import math
 import os
@@ -11,15 +12,20 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
     QSlider,
+    QSplitter,
+    QStackedWidget,
     QVBoxLayout,
+    QWidget,
 )
 
+from demo_replay import SimulationView
 from demo_site import demo_obstacles
 from display import TargetNames, eastern
 from map_tracks import MAX_FIXES, PLAN_TTL_NS, MapTracks
@@ -28,6 +34,7 @@ from runway_map import RunwayMap
 
 def export_evidence(folder, destination):
     files = [folder / "events.jsonl", folder / "console.log"]
+    files.extend(sorted(folder.glob("radio-*.jsonl.gz")))
     files.extend(sorted((folder / "evidence").glob("*.jpg")))
     if any(
         not f.is_file() or f.is_symlink() or folder.resolve() not in f.resolve().parents
@@ -63,8 +70,13 @@ class JournalReplay(QDialog):
         self.target_resets, self.target_indices = [0], [0]
         self.obstacle_scenes = [()]
         self.progress_times, self.progress = [], []
+        self.states = parent.fsm_panel.states if parent and hasattr(parent, "fsm_panel") else {}
+        self.sim = SimulationView()
+        self.mode_times, self.modes = [0], [""]
+        self.simulations = {}
         end = 0
-        with path.open(encoding="utf-8") as source:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as source:
             for i, line in enumerate(source, 1):
                 try:
                     row = json.loads(line)
@@ -73,6 +85,26 @@ class JournalReplay(QDialog):
                         raise ValueError("invalid elapsed time")
                     end = ms
                     event = row["event"]
+                    if event == "serial" and row.get("direction") != "tx_failed":
+                        continue
+                    if event in ("sim_preview", "sim_layout"):
+                        job = row["job_id"]
+                        timeline = self.simulations.setdefault(job, {"times": [], "rows": [], "fixes": [], "scene": None})
+                        if job != self.modes[-1]:
+                            self.mode_times.append(ms)
+                            self.modes.append(job)
+                        if event == "sim_preview":
+                            sample = self.sim.parse_sample(row["detail"], None)
+                            if sample is None:
+                                raise ValueError("Invalid simulation sample")
+                            timeline["times"].append(ms)
+                            timeline["rows"].append(sample)
+                            timeline["fixes"].append((ms, sample[2]/100, sample[3]/100, sample[4]))
+                        else:
+                            timeline["scene"] = (ms, row["detail"])
+                    if self.modes[-1] and (event == "disconnect" or (event == "workspace" and row["detail"] == "Field")):
+                        self.mode_times.append(ms)
+                        self.modes.append("")
                     if event == "location":
                         lat, lon, heading = row["pose"]
                         if not (
@@ -150,9 +182,22 @@ class JournalReplay(QDialog):
                                 )
                             )
                             self.target_times.append(ms)
-                        clock = eastern(datetime.fromisoformat(row["utc"]).timestamp())
-                        self.events.append(f"{clock} ET   {event}   {names.in_text(row['detail'])}")
-                        self.event_times.append(ms)
+                    clock = eastern(datetime.fromisoformat(row["utc"]).timestamp())
+                    detail = names.in_text(row["detail"])
+                    if event == "sim_preview":
+                        phase = self.states.get(sample[1], (f"State {sample[1]}", ""))[0]
+                        detail = f"{phase} · ({sample[2]/100:.2f}, {sample[3]/100:.2f}) m · {sample[4]}° · {sample[5]} queued"
+                    elif event == "sim_layout":
+                        detail = "Received the seeded map and assigned targets"
+                    elif event == "app_status":
+                        detail = f"Jetson job {row['state']}"
+                    elif event in ("ack", "nack"):
+                        fields = row.get("fields", {})
+                        detail = f"Topic {fields.get('topic', '—')} · message {fields.get('wire_id', '—')}"
+                    elif event == "location":
+                        detail = f"{lat:.6f}°, {lon:.6f}°" + (f" · {heading:.0f}° true" if heading is not None else "")
+                    self.events.append(f"{clock} ET   {event.replace('_', ' ').capitalize()}   {detail}")
+                    self.event_times.append(ms)
                 except (TypeError, KeyError, ValueError, OverflowError) as err:
                     raise ValueError(f"Invalid GS recording at line {i}: {err}") from err
         if not self.fixes and not self.events:
@@ -164,10 +209,20 @@ class JournalReplay(QDialog):
         toolbar.addWidget(title, 1)
         self.map = RunwayMap()
         self.finished.connect(self.map.stop_tiles)
-        toolbar.addWidget(self.map.layer_switch())
+        self.layers = self.map.layer_switch()
+        toolbar.addWidget(self.layers)
         layout.addLayout(toolbar)
         self.map.target_name = names
-        layout.addWidget(self.map, 2)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        layout.addWidget(split, 1)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self.views = QStackedWidget()
+        self.views.addWidget(self.map)
+        self.views.addWidget(self.sim)
+        left_layout.addWidget(self.views, 1)
+        split.addWidget(left)
         key = QHBoxLayout()
         for text, name in (("┅  Nav2 plan", "planKey"), ("━  GPS track", "trackKey")):
             caption = QLabel(text)
@@ -177,14 +232,34 @@ class JournalReplay(QDialog):
         self.obstacle_key.setObjectName("obstacleKey")
         key.addWidget(self.obstacle_key)
         key.addStretch()
-        layout.addLayout(key)
+        self.legend = QWidget()
+        self.legend.setLayout(key)
+        left_layout.addWidget(self.legend)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        layout.addWidget(self.log, 1)
+        right = QWidget()
+        side = QVBoxLayout(right)
+        self.current_event = QLabel()
+        self.current_event.setWordWrap(True)
+        self.current_event.setTextFormat(Qt.TextFormat.PlainText)
+        side.addWidget(QLabel("Current event"))
+        side.addWidget(self.current_event)
+        side.addWidget(self.log, 1)
+        split.addWidget(right)
+        split.setSizes([580, 300])
         row = QHBoxLayout()
         layout.addLayout(row)
         self.play = QPushButton("Play")
         row.addWidget(self.play)
+        for seconds in (-5, -1, 1, 5):
+            button = QPushButton(f"{seconds:+d} s")
+            button.clicked.connect(lambda _, delta=seconds: self.seek(delta))
+            row.addWidget(button)
+        self.speed = QComboBox()
+        for rate in (.5, 1, 2, 5, 20):
+            self.speed.addItem(f"{rate:g}×", rate)
+        self.speed.setCurrentIndex(1)
+        row.addWidget(self.speed)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, end)
         row.addWidget(self.slider, 1)
@@ -232,7 +307,35 @@ class JournalReplay(QDialog):
         if self.map.initial_view:
             self.map.fit_targets()
         self.map.update()
+        job = self.modes[bisect_right(self.mode_times, ms) - 1]
+        self.views.setCurrentWidget(self.sim if job else self.map)
+        self.layers.setVisible(not job)
+        self.legend.setVisible(not job)
+        if job:
+            timeline = self.simulations[job]
+            i = bisect_right(timeline["times"], ms)
+            scene = timeline["scene"]
+            if self.sim.job != job or (self.sim.seed is not None and scene and ms < scene[0]):
+                self.sim.reset()
+                self.sim.job = job
+            if scene and ms >= scene[0] and self.sim.seed is None:
+                self.sim.accept_scene(scene[1])
+            plot = self.sim.plot
+            plot.trace["fixes"] = timeline["fixes"][max(0, i-2048):i]
+            plot.trace["target_time"] = math.inf
+            plot.elapsed = ms
+            plot.show_robot = bool(i and ms - timeline["times"][i-1] <= 3000)
+            self.sim.detail.setText("Recorded simulation · local metres")
+            if i:
+                row = timeline["rows"][i-1]
+                phase = self.states.get(row[1], (f"State {row[1]}", ""))[0]
+                self.sim.detail.setText(f"{phase} · {row[5]} queued · local metres")
+                if len(row) == 8:
+                    plot.trace["target"] = (row[6]/100, row[7]/100)
+                    plot.trace["target_time"] = timeline["times"][i-1]
+            plot.update()
         i = bisect_right(self.event_times, ms)
+        self.current_event.setText(self.events[i-1] if i else "Waiting for first event")
         text = "\n".join(self.events[max(0, i - 35) : i])
         if self.log.toPlainText() != text:
             self.log.setPlainText(text)
@@ -245,6 +348,10 @@ class JournalReplay(QDialog):
         self.timer.stop()
         self.play.setText("Play")
 
+    def seek(self, seconds):
+        self.pause()
+        self.slider.setValue(self.slider.value() + seconds * 1000)
+
     def toggle(self):
         if self.timer.isActive():
             self.pause()
@@ -256,4 +363,4 @@ class JournalReplay(QDialog):
             self.play.setText("Pause")
 
     def advance(self):
-        self.slider.setValue(self.slider.value() + self.clock.restart())
+        self.slider.setValue(self.slider.value() + round(self.clock.restart() * self.speed.currentData()))

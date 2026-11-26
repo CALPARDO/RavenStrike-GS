@@ -242,19 +242,26 @@ class SimulationView(QWidget):
         self.plot.update()
         return True
 
-    def accept(self, msg, stamp):
-        if not msg.detail.startswith("sim1:") or len(msg.detail) > 133:
-            return False
+    @staticmethod
+    def parse_sample(detail, stamp, previous=0):
+        if not detail.startswith("sim1:") or len(detail) > 133:
+            return None
         try:
-            row = json.loads(msg.detail[5:])
+            row = json.loads(detail[5:])
         except (ValueError, RecursionError):
-            return False
+            return None
         if (not isinstance(row, list) or len(row) not in (6, 8)
                 or any(type(v) is not int for v in row)
-                or not self.stamp < row[0] <= stamp // 1_000_000
-                or stamp // 1_000_000 - row[0] > 2500 or not 0 <= row[1] <= 255
+                or not previous < row[0]
+                or (stamp is not None and not 0 <= stamp // 1_000_000 - row[0] <= 2500) or not 0 <= row[1] <= 255
                 or not 0 <= row[4] < 360 or not 0 <= row[5] <= 32
                 or any(abs(v) > 10000 for v in row[2:4] + row[6:])):
+            return None
+        return row
+
+    def accept(self, msg, stamp):
+        row = self.parse_sample(msg.detail, stamp, self.stamp)
+        if row is None:
             return False
         self.stamp, self.code, x, y, heading, self.queued, *target = row
         x, y = x / 100, y / 100

@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,10 +21,13 @@ if __name__ == "__main__" and sys.argv[1:2] == ["--fetch-map-tiles"]:
 from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
+    QColor,
     QDesktopServices,
     QImageReader,
     QPixmap,
     QTextBlockUserData,
+    QTextCharFormat,
+    QTextCursor,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -62,7 +66,7 @@ from demo_replay import DemoReplay, SimulationView
 from demo_site import SITE, SITE_ZOOM, demo_obstacles
 from display import eastern
 from fsm_panel import FsmPanel
-from health_panel import HealthPanel
+from health_panel import PROBES, HealthPanel
 from location import LocationTrack
 from map_tracks import route_points
 from radio import Radio
@@ -169,6 +173,9 @@ class CommandButton(QPushButton):
         super().setText(text)
 
 
+SIM_ACTIVE = ("running", "pausing", "paused", "resuming", "stopping")
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -181,6 +188,9 @@ class Window(QMainWindow):
         self.radio = self.station = self.journal = None
         self.log_folder = self.last_rx = self.presentation = self.shown = None
         self.queue_rows = self.link_state = self.last_event = None
+        self.leave_job = None
+        self.health_key = None
+        self.activity_entries = deque(maxlen=400)
         self.simulation = False
         self.setWindowTitle("RavenStrike | Mission control")
         root = QWidget()
@@ -210,7 +220,7 @@ class Window(QMainWindow):
             group.addButton(button)
             controls.addWidget(button)
         self.field_button.setChecked(True)
-        self.field_button.clicked.connect(lambda: self.set_workspace(False))
+        self.field_button.clicked.connect(self.request_field)
         self.sim_button.clicked.connect(lambda: self.set_workspace(True))
         bar.addWidget(switch)
         bar.addStretch()
@@ -221,7 +231,14 @@ class Window(QMainWindow):
         self.link.setObjectName("link")
         self.link.setIcon(icon("radio"))
         self.link.setToolTip("Open radio connection settings")
-        self.stops = QPushButton(icon("stop"), "Stop controls")
+        self.record_button = self.button(bar, "Record", self.toggle_record)
+        self.stops = QToolButton()
+        self.stops.setText("Stop mission")
+        self.stops.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.stops.setIcon(icon("stop"))
+        self.stops.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.stops.clicked.connect(self.command_action("Stop mission", self.stop_mission).trigger)
+        self.stops.setToolTip("Stop autonomous navigation and cleaning in this session")
         self.stops.setObjectName("stopMenu")
         self.stops.setAccessibleName("Mission and simulation stop controls")
         self.stop_menu = QMenu(self.stops)
@@ -338,7 +355,7 @@ class Window(QMainWindow):
 
         drawer = QDialog(self)
         drawer.setWindowTitle("Subsystem health")
-        drawer.resize(370, 440)
+        drawer.resize(760, 470)
         details = QVBoxLayout(drawer)
         self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
         details.addWidget(self.health_panel)
@@ -441,6 +458,7 @@ class Window(QMainWindow):
             lambda: self.confirm("abort", "Request abort and return to base?"),
         )
         self.abort.setIcon(icon("return"))
+        self.field_pause = self.button(column, "Pause mission", self.toggle_field_pause)
         self.scan_state = label("Scanning closed", "closed")
         row.addWidget(self.scan_state)
 
@@ -540,6 +558,13 @@ class Window(QMainWindow):
         pane.addLayout(bar)
         bar.addWidget(label("Event log", "heading"))
         bar.addStretch()
+        self.source_filters = {}
+        for source in ("GS", "UGV"):
+            toggle = QCheckBox(source)
+            toggle.setChecked(True)
+            toggle.toggled.connect(self.filter_activity)
+            self.source_filters[source] = toggle
+            bar.addWidget(toggle)
         self.open_logs = self.button(bar, "Open folder", self.open_log_folder)
         self.log = ActivityLog()
         self.log.setReadOnly(True)
@@ -548,11 +573,11 @@ class Window(QMainWindow):
         self.log.setPlaceholderText("Radio and operator events appear here.")
         pane.addWidget(self.log)
 
-        self.stop_menu.addSection("Field robot")
-        self.stop_menu.addAction(self.halt)
         self.stop_menu.addAction(self.abort)
         self.stop_menu.addAction(self.scan.action)
-        self.stop_menu.addAction("Hardware E-stop · physical control only").setEnabled(False)
+        self.stop_menu.addSeparator()
+        self.trigger_estop = self.command_action("Trigger Lynx base E-stop", self.platform_estop)
+        self.stop_menu.addAction(self.trigger_estop)
         self.simulation_panel()
 
     def simulation_panel(self):
@@ -573,6 +598,7 @@ class Window(QMainWindow):
         self.catalog = json.loads((CONTRACT / "apps.json").read_text())
         self.launch_app = self.button(layout, "Run mission", lambda: self.app_command("start"))
         self.launch_app.setObjectName("primary")
+        self.pause_app = self.button(layout, "Pause", self.toggle_sim_pause)
         self.stop_app = self.button(layout, "Stop simulation", lambda: self.app_command("stop"))
         self.stop_app.setObjectName("stopSimulation")
         self.stop_app.setIcon(icon("stop"))
@@ -586,7 +612,16 @@ class Window(QMainWindow):
         self.sim_values = []
         for caption in ("Seed used", "Targets queued", "Heading"):
             value = label("—", "meter")
-            stats.addRow(label(caption, "field"), value)
+            if caption == "Seed used":
+                seed_row = QHBoxLayout()
+                seed_row.addWidget(value)
+                self.copy_seed = self.button(seed_row, "Copy", lambda: QApplication.clipboard().setText(str(self.sim_view.seed)))
+                self.copy_seed.setObjectName("mapTool")
+                self.copy_seed.setAccessibleName("Copy seed used")
+                seed_row.addStretch()
+                stats.addRow(label(caption, "field"), seed_row)
+            else:
+                stats.addRow(label(caption, "field"), value)
             self.sim_values.append(value)
         layout.addLayout(stats)
         layout.addStretch()
@@ -669,12 +704,12 @@ class Window(QMainWindow):
             self,
             "Open session recording",
             str(self.log_folder or ""),
-            "GS journal (events.jsonl)",
+            "GS recordings (*.jsonl *.jsonl.gz)",
         )
         if path:
             try:
                 dialog = JournalReplay(Path(path), self)
-            except (ValueError, OSError) as err:
+            except (ValueError, OSError, EOFError) as err:
                 self.event_line(f"Cannot open recording · {err}")
                 return
             dialog.exec()
@@ -716,8 +751,76 @@ class Window(QMainWindow):
         return bool(self.station and self.station.session and self.station.state not in
                     ("completed", "canceled", "halted", "rejected"))
 
+    def request_field(self):
+        snap = self.app_snapshot
+        if self.simulation and (self.pending_until or (snap and snap.state in SIM_ACTIVE)):
+            self.sim_button.setChecked(True)
+            if self.pending_until or not self.app_fresh():
+                self.event_line("Wait for current Jetson job status before switching to Field.")
+                return
+            job_id = snap.job_id
+            if snap.state == "stopping":
+                self.leave_job = job_id
+                return
+            answer = QMessageBox.question(self, "Switch to Field", "End the running simulation and switch to Field?",
+                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                          QMessageBox.StandardButton.No)
+            if (answer == QMessageBox.StandardButton.Yes and self.app_fresh()
+                    and self.app_snapshot.job_id == job_id):
+                self.leave_job = job_id
+                self.stop_app.action.trigger()
+            return
+        self.set_workspace(False)
+
+    def toggle_record(self):
+        if not self.journal:
+            return
+        self.drain()
+        if self.journal.recording:
+            self.journal.serial_data(*self.radio.transport.take_capture(False))
+            self.journal.stop_recording()
+            self.event_line(f"Recording saved · {self.journal.record_path}")
+        elif not self.simulation and self.app_fresh() and self.app_snapshot.fsm_state == self.app_snapshot.FSM_BRING_UP_SYSTEM:
+            self.journal.start_recording()
+            self.radio.transport.take_capture(True)
+            self.journal.log("record_context", "Field · Bring up system", build=self.build,
+                             wire_version=WIRE_MAP_VERSION, source_ns=self.app_stamp)
+            self.event_line(f"Recording · {self.journal.record_path.name}")
+        self.tick()
+
+    def platform_estop(self):
+        if not self.simulation and self.radio and self.radio.ready and self.app_fresh() and self.health_panel.can_trigger():
+            msg = self.codec.types["AppCommand"](self.codec.stamp(), uuid4().hex, "trigger", "lynx-estop", "", False)
+            self.station.send(21, msg, "Trigger Lynx base E-stop")
+            self.event_line("Lynx E-stop requested · awaiting hardware input")
+
+    def stop_mission(self):
+        if not self.simulation and self.station and self.radio.ready and self.station.can_halt:
+            if self.health_panel.can_pause():
+                self.station.command("stop")
+                self.event_line("Stop requested · awaiting measured stop")
+            else:
+                self.station.command("cancel")
+                self.event_line("Controller capabilities unavailable · requested legacy halt in place")
+            self.tick()
+        else:
+            self.event_line("No active mission stop available. Check the Lynx base E-stop in the menu.")
+
+    def toggle_field_pause(self):
+        if not self.simulation and self.station and self.radio.ready and self.health_panel.can_pause():
+            command = "continue" if self.station.state == "paused" else "pause"
+            self.station.command(command)
+            self.event_line(f"Mission {command} requested · awaiting controller status")
+
+    def toggle_sim_pause(self):
+        if self.app_fresh():
+            self.app_command("continue" if self.app_snapshot.state == "paused" else "pause")
+
     def set_workspace(self, simulation):
+        previous = self.simulation
         self.simulation = bool(simulation and not self.field_busy())
+        if self.journal and previous != self.simulation:
+            self.journal.log("workspace", "Simulation" if self.simulation else "Field")
         self.field_button.setChecked(not self.simulation)
         self.sim_button.setChecked(self.simulation)
         self.map_page.setCurrentWidget(self.sim_view if self.simulation else self.field_map)
@@ -775,8 +878,9 @@ class Window(QMainWindow):
             raise ValueError("Wait for Jetson status.")
         if not self.simulation or self.field_busy() or self.pending_until:
             raise ValueError("Simulation control is unavailable.")
-        if operation == "stop":
-            if snap.state != "running" or not snap.job_id:
+        if operation in ("stop", "pause", "continue"):
+            allowed = {"stop": SIM_ACTIVE[:-1], "pause": ("running",), "continue": ("paused",)}
+            if snap.state not in allowed[operation] or not snap.job_id:
                 raise ValueError("No running simulation.")
             request, key, scenario = snap.job_id, snap.app, ""
         elif operation == "start":
@@ -815,7 +919,7 @@ class Window(QMainWindow):
         fresh_sim = False
         view = self.sim_view
         if view.job:
-            running_sim = bool(snap and snap.job_id == view.job and snap.state == "running")
+            running_sim = bool(snap and snap.job_id == view.job and snap.state in SIM_ACTIVE[:-1])
             fresh_sim = running_sim and 0 <= time.time_ns()//1_000_000 - view.stamp < 3000
             phase = self.fsm_panel.states.get(view.code, ("Unknown phase", ""))[0]
             view.detail.setText(
@@ -851,12 +955,16 @@ class Window(QMainWindow):
         pending = bool(self.pending_until)
         available = bool(self.simulation and not self.field_busy() and snap and snap.state in
                          ("idle", "stopped", "finished", "failed") and not pending)
-        self.seed.setEnabled(not pending and not (snap and snap.state in ("running", "stopping")))
+        self.seed.setEnabled(not pending and not (snap and snap.state in SIM_ACTIVE))
         self.launch_app.setEnabled(available)
-        active_job = bool(snap and snap.state in ("running", "stopping"))
+        active_job = bool(snap and snap.state in SIM_ACTIVE)
         self.stop_app.setVisible(active_job)
         self.launch_app.setVisible(not active_job)
-        self.stop_app.setEnabled(bool(self.simulation and snap and snap.state == "running" and not pending))
+        self.stop_app.setEnabled(bool(self.simulation and snap and snap.state in SIM_ACTIVE[:-1] and not pending))
+        self.copy_seed.setEnabled(view.seed is not None)
+        self.pause_app.setVisible(active_job)
+        self.pause_app.setEnabled(bool(self.simulation and snap and snap.state in ("running", "paused") and not pending))
+        self.pause_app.setText("Continue" if snap and snap.state == "paused" else "Pause")
         self.job_label.setToolTip(snap.detail if snap else "")
         if pending:
             status = "Waiting for Jetson confirmation"
@@ -972,14 +1080,34 @@ class Window(QMainWindow):
                 self.tasks.selectRow(row)
                 break
 
-    def event_line(self, text, mission=""):
-        if text != self.last_event:
-            self.log.appendPlainText(eastern() + "   " + self.runway.target_name.in_text(text))
-            if mission:
-                data = QTextBlockUserData()
-                data.mission = mission
-                self.log.document().lastBlock().setUserData(data)
-        self.last_event = text
+    def append_activity(self, entry):
+        source, text, mission = entry
+        if not self.source_filters[source].isChecked():
+            return
+        cursor = self.log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not self.log.document().isEmpty():
+            cursor.insertBlock()
+        style = QTextCharFormat()
+        style.setForeground(QColor("#165887" if source == "GS" else "#146956"))
+        cursor.insertText(text, style)
+        if mission:
+            data = QTextBlockUserData()
+            data.mission = mission
+            cursor.block().setUserData(data)
+        self.log.setTextCursor(cursor)
+
+    def filter_activity(self):
+        self.log.clear()
+        for entry in self.activity_entries:
+            self.append_activity(entry)
+
+    def event_line(self, text, mission="", source="GS"):
+        if (source, text) != self.last_event:
+            entry = (source, f"{eastern()}   {source}   {self.runway.target_name.in_text(text)}", mission)
+            self.activity_entries.append(entry)
+            self.append_activity(entry)
+        self.last_event = (source, text)
         self.feedback.setText(self.runway.target_name.in_text(text))
         self.feedback.setToolTip(text)
 
@@ -1040,6 +1168,8 @@ class Window(QMainWindow):
         self.station = Station(self.codec, self.radio, self.journal)
         self.app_snapshot = None
         self.app_stamp = self.app_received = self.pending_until = 0
+        self.leave_job = None
+        self.health_panel.reset_observations()
         self.track = LocationTrack()
         self.runway.last_known = None
         self.invalidate_draft()
@@ -1204,6 +1334,8 @@ class Window(QMainWindow):
         self.robot_caption.setToolTip(caption)
 
     def drain(self):
+        if self.journal and self.journal.recording:
+            self.journal.serial_data(*self.radio.transport.take_capture(True))
         for _ in range(2048):
             try:
                 when, event, data = self.radio.events.get_nowait()
@@ -1213,7 +1345,8 @@ class Window(QMainWindow):
                 topic = data["topic"]
                 arrived = data.get("arrival_mono", time.monotonic())
                 try:
-                    msg = self.codec.decode(data["payload"], self.radio.engine.topics[topic].type)
+                    name = self.radio.engine.topics[topic].type
+                    msg = self.codec.decode(data["payload"], name)
                     if topic == 24:
                         stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
                         if (
@@ -1222,9 +1355,31 @@ class Window(QMainWindow):
                             and stamp > self.app_stamp
                             and -0.2 <= (time.time_ns() - stamp) / 1e9 < 3
                         ):
+                            base, separator, metadata = msg.detail.partition("|h1:")
+                            if separator:
+                                msg.detail = base
+                                if len(metadata) <= 256:
+                                    try:
+                                        old_wait = self.health_panel.waiting_for
+                                        self.health_panel.diagnostics(json.loads(metadata), stamp)
+                                        wait = self.health_panel.waiting_for
+                                        if wait and wait != old_wait:
+                                            self.event_line("Bring up · " + wait, source="UGV")
+                                            self.journal.log("bringup_wait", wait, received=when)
+                                    except (ValueError, RecursionError):
+                                        pass
+                            self.health_panel.observed["Radio"] = when / 1e9
                             previous = self.app_snapshot
+                            if self.journal.recording:
+                                self.journal.log("field_telemetry", self.fsm_panel.states.get(msg.fsm_state, ("Unknown", ""))[0],
+                                                 received=when, source_ns=stamp, battery_percent=msg.battery_percent,
+                                                 estop=msg.estop, health=msg.health, job_state=msg.state)
+                            if msg.detail.startswith("Lynx E-stop") and (previous is None or previous.detail != msg.detail):
+                                self.event_line(msg.detail, source="UGV")
+                                self.journal.log("platform_stop", msg.detail, received=when)
                             if previous is None or previous.fsm_state != msg.fsm_state:
                                 state = self.fsm_panel.states.get(msg.fsm_state)
+                                self.event_line("FSM · " + (state[1] if state else "Unknown"), source="UGV")
                                 self.journal.log(
                                     "fsm_sample",
                                     state[1] if state else "Unknown",
@@ -1233,6 +1388,13 @@ class Window(QMainWindow):
                                     source_ns=stamp,
                                 )
                             if previous is None or previous.health != msg.health:
+                                for key, name, good, fault, _ in PROBES:
+                                    shift = getattr(msg, key)
+                                    level = (msg.health >> shift) & 3
+                                    if previous is None or level != (previous.health >> shift) & 3:
+                                        text = f"{name} · " + ("No report", good, "Degraded", fault)[level]
+                                        self.event_line(text, source="UGV")
+                                        self.journal.log("health_change", text, received=when)
                                 self.journal.log(
                                     "subsystem_health",
                                     f"0x{msg.health:04x}",
@@ -1244,19 +1406,22 @@ class Window(QMainWindow):
                             if (
                                 self.pending_until
                                 and msg.job_id == self.pending_job
-                                and (self.pending_op == "start" or msg.state != "running")
+                                and (self.pending_op == "start" or msg.state in {
+                                    "pause": ("pausing", "paused"), "continue": ("resuming", "running"),
+                                    "stop": ("stopping", "stopped", "finished", "failed"),
+                                }.get(self.pending_op, ()))
                             ):
                                 self.pending_until = 0
                             if self.sim_view.job != msg.job_id:
                                 self.sim_view.reset()
                                 self.sim_view.job = msg.job_id
-                            if msg.state == "running" and msg.job_id:
+                            if msg.state in SIM_ACTIVE[:-1] and msg.job_id:
                                 if self.sim_view.accept_scene(msg.detail):
                                     self.journal.log("sim_layout", msg.detail, job_id=msg.job_id)
                                 if self.sim_view.accept(msg, stamp):
                                     self.journal.log("sim_preview", msg.detail, job_id=msg.job_id)
                             if previous is None or (previous.job_id, previous.state) != (msg.job_id, msg.state):
-                                self.event_line(f"Jetson  ·  {msg.app} {msg.state}")
+                                self.event_line(f"Jetson  ·  {msg.app} {msg.state}", source="UGV")
                                 self.journal.log(
                                     "app_status",
                                     msg.detail,
@@ -1305,13 +1470,13 @@ class Window(QMainWindow):
                     ]
                     self.event_line(
                         "UGV  ·  " + "  ·  ".join(part for part in parts if part),
-                        getattr(msg, "mission_id", "") or getattr(msg, "active_mission_id", ""),
+                        getattr(msg, "mission_id", "") or getattr(msg, "active_mission_id", ""), source="UGV",
                     )
                 except OSError:
                     raise
                 except Exception as err:  # noqa: BLE001 - reject malformed incoming data and keep the operator loop alive
                     self.journal.log("invalid_message", str(err), received=when, topic=topic)
-                    self.event_line("Invalid message: " + str(err))
+                    self.event_line("Invalid message: " + str(err), source="UGV")
             else:
                 detail = data.get("detail", str(data))
                 self.journal.log(event, detail, received=when, fields=data)
@@ -1362,6 +1527,14 @@ class Window(QMainWindow):
         if self.simulation and self.field_busy():
             self.set_workspace(False)
             return
+        if self.leave_job and self.app_fresh():
+            snap = self.app_snapshot
+            if snap.job_id != self.leave_job:
+                self.leave_job = None
+            elif snap.state in ("stopped", "finished", "failed"):
+                self.leave_job = None
+                self.set_workspace(False)
+                return
         self.update_cockpit(ready)
         st = self.station
         points = demo_obstacles(st.area, st.callsign) if st and st.session else ()
@@ -1399,8 +1572,32 @@ class Window(QMainWindow):
                 state = "Contract mismatch"
             else:
                 state = "Waiting for Jetson"
-        self.health_panel.display(state, self.app_snapshot if ready and self.app_fresh() else None)
-        self.health_summary.setText(self.health_panel.summary())
+        snap = self.app_snapshot if ready and self.app_fresh() else None
+        health_key = (state, self.app_stamp if snap else None, int(time.monotonic()))
+        if health_key != self.health_key:
+            self.health_key = health_key
+            if snap:
+                phase = self.fsm_panel.states.get(snap.fsm_state, ("", "Unknown"))[1].replace("_", " ").capitalize()
+                fix = self.track.current()
+                self.health_panel.values["GNSS"] = f"{fix[0]:.6f}°, {fix[1]:.6f}°" if fix else "—"
+                self.health_panel.values["Mission FSM"] = phase
+                if snap.fsm_state == snap.FSM_BRING_UP_SYSTEM and self.health_panel.waiting_for:
+                    self.health_panel.values["Mission FSM"] += " · " + self.health_panel.waiting_for
+            watch = ("Battery", "E-stop", "Camera")
+            before = {name: self.health_panel.rows[name].text() for name in watch}
+            self.health_panel.display(state, snap)
+            if snap and self.journal:
+                for name in watch:
+                    status = self.health_panel.rows[name].text()
+                    if status != before[name]:
+                        text = f"{name} · {status}"
+                        self.event_line(text, source="UGV")
+                        try:
+                            self.journal.log("health_change", text, source_ns=self.app_stamp)
+                        except OSError as err:
+                            self.log_failure(err)
+                            return
+            self.health_summary.setText(self.health_panel.summary())
         if self.link_state != state:
             self.link_state = state
             bg, fg = {
@@ -1421,13 +1618,15 @@ class Window(QMainWindow):
             self.app_snapshot
             and (not self.app_fresh() or not self.app_snapshot.mission_adapter_online)
         )
+        bringing_up = bool(snap and snap.fsm_state in (snap.FSM_TURN_ON, snap.FSM_BRING_UP_SYSTEM))
         self.start.setToolTip(
-            "Field session input is unavailable. Check the Jetson bringup profile and health." if adapter_offline else ""
+            "Field session input is unavailable. Check the Jetson bringup profile and health." if adapter_offline
+            else self.health_panel.waiting_for or "Waiting for field bringup" if bringing_up else ""
         )
         self.start.setEnabled(
             ready and not self.simulation
-            and not (self.pending_until or (self.app_fresh() and self.app_snapshot.state in ("running", "stopping")))
-            and not adapter_offline
+            and not (self.pending_until or (self.app_fresh() and self.app_snapshot.state in SIM_ACTIVE))
+            and not adapter_offline and not bringing_up
             and (
                 not st.session
                 or st.state
@@ -1446,9 +1645,19 @@ class Window(QMainWindow):
         self.scan.setVisible(bool(st and st.operating and not closed))
         self.add_target.setVisible(bool(st and st.operating and not closed))
         self.stops.setVisible(self.radio is not None and not self.simulation)
-        self.stops.setEnabled(ready and not self.simulation)
+        self.stops.setEnabled(bool(ready and not self.simulation and
+                              (st.can_halt or (self.app_fresh() and self.health_panel.can_trigger()))))
+        recording = bool(self.journal and self.journal.recording)
+        self.record_button.setVisible(recording or bool(ready and not self.simulation and self.app_fresh()
+                                     and self.app_snapshot.fsm_state == self.app_snapshot.FSM_BRING_UP_SYSTEM))
+        self.record_button.setText("Stop recording" if recording else "Record")
+        self.trigger_estop.setEnabled(bool(ready and not self.simulation and self.app_fresh() and self.health_panel.can_trigger()
+                                          and self.app_snapshot.state not in SIM_ACTIVE))
+        self.field_pause.setVisible(bool(not self.simulation and st and st.session and (st.operating or st.state == "paused")))
+        self.field_pause.setEnabled(bool(ready and st and self.health_panel.can_pause() and (st.operating or st.state == "paused")))
+        self.field_pause.setText("Continue mission" if st and st.state == "paused" else "Pause mission")
         self.halt.setEnabled(bool(ready and not self.simulation and st.can_halt))
-        self.abort.setEnabled(bool(ready and not self.simulation and st.operating and st.state != "returning"))
+        self.abort.setEnabled(bool(ready and not self.simulation and (st.operating or st.state == "paused") and st.state != "returning"))
         scanning = bool(ready and not self.simulation and st.operating and not st.scanned and not st.scanning_requested)
         self.scan.setText(
             "Scanning closed"
@@ -1457,7 +1666,7 @@ class Window(QMainWindow):
             if st and st.scanning_requested
             else "Scanning complete"
         )
-        self.abort.setText("Return requested" if st and st.abort_requested else "Abort field mission and return to base")
+        self.abort.setText("Return requested" if st and st.abort_requested else "Return to base")
         self.add_target.setEnabled(scanning)
         self.scan.setEnabled(scanning)
         self.submit.setEnabled(
@@ -1482,7 +1691,7 @@ class Window(QMainWindow):
             )
             if st and st.session
             else "Simulation running · field start unavailable"
-            if self.app_fresh() and self.app_snapshot.state in ("running", "stopping")
+            if self.app_fresh() and self.app_snapshot.state in SIM_ACTIVE
             else "Field standby · mission inputs disabled"
             if ready and adapter_offline and self.app_fresh() and self.app_snapshot.fsm_state
             else "Waiting for mission adapter"

@@ -6,10 +6,51 @@ import time
 
 from rfd_bridge.config import load_config
 from rfd_bridge.engine import BridgeEngine
+from rfd_bridge.protocol import HEADER
 from rfd_bridge.reliability import CTRL_ACK, CTRL_NACK, unpack_ack
 from rfd_bridge.transport import SerialTransport
 
 from wire import CONTRACT
+
+
+class CaptureTransport(SerialTransport):
+    """Copy observed bytes to a bounded buffer. Serial threads never write to disk."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.capture_lock = threading.Lock()
+        self.capturing = False
+        self.chunks = []
+        self.missed = 0
+
+    def take_capture(self, active):
+        with self.capture_lock:
+            chunks, missed = self.chunks, self.missed
+            self.chunks, self.missed = [], 0
+            self.capturing = active
+        return chunks, missed
+
+    def observe(self, direction, data):
+        if self.capturing:
+            with self.capture_lock:
+                if self.capturing:
+                    if len(self.chunks) < 4096:
+                        self.chunks.append((time.time_ns(), direction, data))
+                    else:
+                        self.missed += 1
+
+    def start(self, receive, state):
+        def incoming(data):
+            self.observe("rx", data)
+            receive(data)
+        super().start(incoming, state)
+
+    def write(self, data):
+        written = super().write(data)
+        # The bridge submits one complete frame per write. Topic 3 is the GS heartbeat.
+        if self.capturing and HEADER.unpack_from(data)[3] != 3:
+            self.observe("tx" if written else "tx_failed", data)
+        return written
 
 
 class FieldEngine(BridgeEngine):
@@ -76,9 +117,10 @@ class Radio:
         config = load_config(str(CONTRACT / "gs.yaml"), resolve_types=False)
         config.serial.port = port
         config.serial.reconnect = False
+        self.transport = CaptureTransport(config.serial)
         self.engine = FieldEngine(
             config,
-            SerialTransport(config.serial),
+            self.transport,
             self.receive,
             lambda level, detail: self.event("radio", level=level, detail=detail),
             event=self.event,

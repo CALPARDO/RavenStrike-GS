@@ -158,7 +158,7 @@ def test_session_controls_and_reported_queue(window, monkeypatch):
     assert sent[-1][1].command == "scan_complete" and not w.submit.isEnabled()
     receive(scanned=True)
     assert w.scan.text() == "Scanning closed"
-    assert w.stop_menu.actions()[1] is w.halt
+    assert w.stop_menu.actions()[:2] == [w.abort, w.scan.action]
     w.abort.trigger()
     assert sent[-1][1].command == "abort" and not w.abort.isEnabled()
     assert w.halt.isEnabled()
@@ -442,10 +442,10 @@ def test_health_colors_and_stale_reset(window):
         0,
         (1 << kind.NAV2) | (2 << kind.ODOMETRY) | (3 << kind.GNSS),
     )
-    assert panel.rowCount() == 12 and panel.columnCount() == 2
-    assert panel.item(0, 0).text() == "Radio"
+    assert panel.rowCount() == 13 and panel.columnCount() == 5
+    assert panel.item(panel.rows["Camera"].row(), 0).text() == "Perception"
     panel.display("Radio ready", msg)
-    assert panel.item(0, 1).text() == "Ready"
+    assert panel.rows["Radio"].text() == "Ready"
     assert [panel.rows[n].data(Qt.ItemDataRole.UserRole) for n in ("Nav2", "Odometry", "GNSS", "Cleaning")] == [
         1,
         2,
@@ -929,9 +929,18 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     assert view.plot.trace["fixes"][-1][1:] == (1.5, -.5, 45)
     assert w.runway.robot is None and not w.runway.tracks.fixes
     assert w.fsm_panel.chart.active == "NAVIGATION_MODE"
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.No)
     w.field_button.click()
+    assert w.sim_button.isChecked() and w.simulation
+    sent = []
+    monkeypatch.setattr(w.radio, "send", lambda topic, cmd: sent.append(cmd) or 1)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.Yes)
+    w.field_button.click()
+    assert w.simulation and sent[-1].operation == "stop" and sent[-1].request_id == msg.job_id
+    msg.stamp, msg.state, msg.detail = w.codec.stamp(), "stopped", ""
+    w.radio.receive(24, w.codec.encode(msg))
     w.tick()
-    assert w.fsm_panel.chart.active == "BRING_UP_SYSTEM"
+    assert not w.simulation and w.fsm_panel.chart.active == "BRING_UP_SYSTEM"
     msg.detail = "sim1:" + json.dumps([ms+1, 4, 9999999, 50, 0, 0])
     assert not view.accept(msg, (ms+2)*1_000_000)
     w.app_received -= 4
@@ -993,3 +1002,71 @@ def test_sim_map_obstacles_share_track_projection(window):
     for x, y in ((175, 140), (400, 340)):
         assert image.pixelColor(round(x * ratio), round(y * ratio)).name() == "#ded0b8"
     assert image.pixelColor(round(305 * ratio), round(245 * ratio)).name() != "#ded0b8"
+
+
+def test_field_recording_stop_health_and_playback(window, monkeypatch):
+    import base64
+    import gzip
+
+    from session_files import JournalReplay
+
+    w = window
+    sent = []
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "send", lambda self, topic, msg: sent.append((topic, msg)) or 1)
+    w.port.setCurrentText("fixture")
+    w.connect_radio()
+    w.radio.ready = True
+    status = w.codec.types["FieldStatus"]
+    ages = [0, 1, 1, 1, -1, -1, 0, -1, 1, 0, 0]
+    msg = status(w.codec.stamp(), "", "", "idle", "|h1:"+json.dumps(
+        [ages, 25, 159, 3, "stale or missing scan"]), 88, 0, True, status.FSM_BRING_UP_SYSTEM, 0)
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    assert w.record_button.isVisible() and w.trigger_estop.isEnabled()
+    assert w.health_panel.values["Odometry"] == "0.25 m/s"
+    assert "stale or missing scan" in w.health_panel.values["Mission FSM"]
+    w.record_button.click()
+    assert w.journal.recording and w.record_button.text() == "Stop recording"
+    actual = b"\x00raw serial\xff"
+    w.radio.transport.observe("rx", actual)
+    w.station.start("UGV-1", "fixture", (0., 0., 0.))
+    w.station.state = "working"
+    w.tick()
+    w.field_pause.click()
+    assert sent[-1][1].command == "pause"
+    w.station.state = "paused"
+    w.tick()
+    w.field_pause.click()
+    assert sent[-1][1].command == "continue"
+    QTest.mouseClick(w.stops, Qt.MouseButton.LeftButton, pos=QPoint(10, w.stops.height()//2))
+    assert sent[-1][1].command == "stop" and all(topic == 5 for topic, _ in sent)
+    w.trigger_estop.trigger()
+    assert sent[-1][0] == 21 and sent[-1][1].operation == "trigger"
+
+    w.event_line("Command queued", source="GS")
+    w.event_line("Collector reporting", source="UGV")
+    w.source_filters["UGV"].setChecked(False)
+    assert "Collector reporting" not in w.log.toPlainText() and "Command queued" in w.log.toPlainText()
+    w.source_filters["GS"].setChecked(False)
+    assert not w.log.toPlainText()
+    w.source_filters["UGV"].setChecked(True)
+    assert "Collector reporting" in w.log.toPlainText() and "Command queued" not in w.log.toPlainText()
+    w.journal.log("sim_preview", "sim1:[1234,7,20,30,90,1]", job_id="job")
+    w.record_button.click()
+    path = w.journal.record_path
+    with gzip.open(path, "rt") as clip:
+        rows = [json.loads(line) for line in clip]
+    assert rows[0]["event"] == "record_start" and rows[-1]["event"] == "record_stop"
+    chunk, = [r for r in rows if r["event"] == "serial"]
+    assert chunk["direction"] == "rx" and base64.b64decode(chunk["data"]) == actual
+    assert all(isinstance(r["utc_ns"], int) for r in rows)
+    playback = JournalReplay(path, w)
+    assert [playback.speed.itemData(i) for i in range(5)] == [.5, 1, 2, 5, 20]
+    playback.seek(5)
+    assert playback.views.currentWidget() is playback.sim and playback.sim.plot.trace["fixes"][-1][1:] == (.2,.3,90)
+    assert "Record stop" in playback.current_event.text()
+    playback.seek(-5)
+    assert playback.slider.value() == 0
+    playback.close()

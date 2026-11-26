@@ -1,5 +1,7 @@
 """State the GS has observed, never a local mission FSM."""
 
+import base64
+import gzip
 import hashlib
 import json
 import time
@@ -25,6 +27,7 @@ def contents(value):
 
 class Journal:
     def __init__(self, root):
+        self.recording = None
         self.start = time.monotonic()
         self.folder = Path(root) / (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid4().hex[:8])
         (self.folder / "evidence").mkdir(parents=True)
@@ -32,20 +35,53 @@ class Journal:
         self.events = (self.folder / "events.jsonl").open("x", buffering=1, encoding="utf-8")
 
     def log(self, event, detail, *, received=None, **data):
-        when = datetime.fromtimestamp((received or time.time_ns()) / 1e9, UTC).isoformat(
+        utc_ns = received or time.time_ns()
+        when = datetime.fromtimestamp(utc_ns / 1e9, UTC).isoformat(
             timespec="milliseconds"
         )
         entry = dict(
-            utc=when,
+            utc=when, utc_ns=utc_ns,
             elapsed_s=round(time.monotonic() - self.start, 3),
             event=event,
             detail=detail,
             **data,
         )
+        self.capture(entry)
         self.events.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self.console.write(f"{when} {event}: {detail}\n")
 
+    def start_recording(self):
+        if self.recording:
+            raise ValueError("Recording already active")
+        self.record_path = self.folder / ("radio-" + datetime.now(UTC).strftime("%H%M%S-%f") + ".jsonl.gz")
+        self.recording = gzip.open(self.record_path, "xt", encoding="utf-8", compresslevel=1)  # noqa: SIM115 - spans Record and Stop
+        self.record_start = time.monotonic_ns()
+        self.log("record_start", "GS radio capture started")
+
+    def capture(self, row):
+        if self.recording:
+            row = dict(row, elapsed_s=(time.monotonic_ns() - self.record_start) / 1e9)
+            self.recording.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n")
+
+    def serial_data(self, chunks, missed):
+        for ns, direction, raw in chunks:
+            self.capture({"event": "serial", "direction": direction, "utc_ns": ns,
+                              "utc": datetime.fromtimestamp(ns / 1e9, UTC).isoformat(),
+                              "detail": f"{direction} · {len(raw)} bytes",
+                              "data": base64.b64encode(raw).decode("ascii")})
+        if missed:
+            self.log("capture_gap", f"{missed} serial chunks exceeded the recorder buffer")
+
+    def stop_recording(self):
+        if self.recording:
+            try:
+                self.log("record_stop", "GS radio capture stopped")
+            finally:
+                self.recording.close()
+                self.recording = None
+
     def close(self):
+        self.stop_recording()
         self.events.close()
         self.console.close()
 
@@ -135,14 +171,18 @@ class Station:
 
     @property
     def can_halt(self):
-        return (bool(self.session) and self.state in ("working", "returning", "standby")
+        return (bool(self.session) and self.state in ("working", "returning", "standby", "paused")
                 and (self.cancel_requested_at is None or time.monotonic() - self.cancel_requested_at >= 3))
 
     def command(self, command):
-        if command == "cancel":
+        if command in ("cancel", "stop"):
             allowed = self.can_halt
+        elif command == "continue":
+            allowed = self.state == "paused" and self.cancel_requested_at is None
+        elif command == "pause":
+            allowed = self.operating
         else:
-            allowed = self.operating and command in ("scan_complete", "abort")
+            allowed = (self.operating or self.state == "paused") and command in ("scan_complete", "abort")
         if not allowed:
             raise ValueError("Session cannot accept this command.")
         if command == "scan_complete" and (self.scanned or self.scanning_requested):
@@ -154,9 +194,9 @@ class Station:
         )
         if command == "scan_complete":
             self.scanning_requested = True
-        elif command == "cancel":
+        elif command in ("cancel", "stop"):
             self.cancel_requested_at = time.monotonic()
-        else:
+        elif command == "abort":
             self.abort_requested = True
 
     def add(self, lat, lon, alt):

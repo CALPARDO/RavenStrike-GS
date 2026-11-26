@@ -141,3 +141,32 @@ def test_selection_report_precedes_active_snapshot(station):
     assert sum(line.endswith("   Active") for line in st.timeline[mission]) == 1
     status(st, "return:" + st.session, "queue empty", sec=6, state="returning")
     assert set(st.timeline) == {mission}
+
+
+def test_serial_capture_preserves_writes_retries_and_received_bytes(monkeypatch):
+    from rfd_bridge.config import load_config
+    from rfd_bridge.protocol import Frame
+
+    from radio import CaptureTransport, SerialTransport
+    from wire import CONTRACT
+
+    config = load_config(str(CONTRACT / "gs.yaml"), resolve_types=False).serial
+    capture = CaptureTransport(config)
+    transmitted = []
+    received = []
+    monkeypatch.setattr(SerialTransport, "start", lambda self, callback, state: received.append(callback))
+    monkeypatch.setattr(SerialTransport, "write", lambda self, raw: transmitted.append(raw) or True)
+    capture.start(lambda _: None, lambda *_: None)
+    data = Frame(5, 1, 0, 1, b"message").pack()
+    retry = Frame(5, 1, 0, 1, b"message", flags=3).pack()
+    heartbeat = Frame(3, 2, 0, 1, b"heartbeat").pack()
+    capture.take_capture(True)
+    for raw in (data, heartbeat, retry):
+        assert capture.write(raw)
+    received[0](b"partial frame")
+    chunks, missed = capture.take_capture(False)
+    assert not missed and transmitted == [data, heartbeat, retry]
+    assert [(direction, payload) for _, direction, payload in chunks] == [
+        ("tx", data), ("tx", retry), ("rx", b"partial frame")]
+    received[0](b"outside clip")
+    assert capture.take_capture(False) == ([], 0)
