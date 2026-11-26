@@ -46,12 +46,16 @@ try:
     w.scenario.setCurrentText("nav-rejected")
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
+    wait(lambda: w.sim_view.stamp > 0 and w.tabs.currentWidget() is w.sim_view, 45)
+    assert w.sim_view.plot.trace["fixes"] and w.runway.robot is None
     wait(lambda: w.app_snapshot.state in ("finished", "failed"), 120)
     assert w.app_snapshot.state == "finished", w.app_snapshot.detail
     print("PASS actual nav-rejected scenario completed", w.app_snapshot.detail, flush=True)
     w.app_choice.setCurrentIndex(w.app_choice.findData("nav2-demo"))
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
+    wait(lambda: len(w.sim_view.plot.trace["fixes"]) >= 3 and any(x or y for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 60)
+    print("PASS received changing Nav2 simulation position and FSM over serial", flush=True)
     w.stop_app.click()
     wait(lambda: w.app_snapshot.state == "stopped")
     print("PASS operator stop", flush=True)

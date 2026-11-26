@@ -54,8 +54,8 @@ from PySide6.QtWidgets import (
 from serial.tools import list_ports
 
 from appearance import field_theme, icon
-from demo_replay import DemoReplay
-from demo_site import SITE, SITE_ZOOM, demo_obstacles
+from demo_replay import DemoReplay, SimulationView
+from demo_site import OBSTACLES_XY, SITE, SITE_ZOOM, demo_obstacles
 from display import eastern
 from fsm_panel import FsmPanel
 from health_panel import HealthPanel
@@ -306,22 +306,17 @@ class Window(QMainWindow):
         self.health_details.setDefaultAction(self.health_action)
         meters.addWidget(self.health_details)
 
-        drawer = QFrame()
-        drawer.setObjectName("card")
-        workspace.addWidget(drawer)
+        drawer = QDialog(self)
+        drawer.setWindowTitle("Subsystem health")
         details = QVBoxLayout(drawer)
-        heading = QHBoxLayout()
-        details.addLayout(heading)
-        heading.addWidget(label("Subsystem health", "heading"))
-        heading.addStretch()
-        close = QPushButton("Close")
-        close.setAccessibleName("Close subsystem health")
-        close.clicked.connect(lambda: self.health_action.setChecked(False))
-        heading.addWidget(close)
         self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
         details.addWidget(self.health_panel)
         self.health_action.toggled.connect(drawer.setVisible)
-        drawer.hide()
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setAccessibleName("Close subsystem health")
+        buttons.rejected.connect(drawer.reject)
+        drawer.finished.connect(lambda _: self.health_action.setChecked(False))
+        details.addWidget(buttons)
 
     def map_panel(self, column):
         pane = column
@@ -520,6 +515,10 @@ class Window(QMainWindow):
         self.log.setPlaceholderText("Radio and operator events appear here.")
         pane.addWidget(self.log)
 
+        self.sim_view = SimulationView()
+        self.sim_tab = self.tabs.addTab(self.sim_view, icon("map"), "Jetson simulation")
+        self.tabs.setTabVisible(self.sim_tab, False)
+
         apps = self.apps_dialog = QDialog(self)
         apps.setWindowTitle("Jetson simulations")
         layout = QVBoxLayout(apps)
@@ -566,12 +565,15 @@ class Window(QMainWindow):
 
         view = self.menuBar().addMenu("&View")
         for i in range(self.tabs.count()):
-            action(
+            item = action(
                 view,
                 self.tabs.tabText(i),
                 lambda checked=False, i=i: self.tabs.setCurrentIndex(i),
                 f"Ctrl+{i + 1}",
             )
+            if i == self.sim_tab:
+                self.sim_map_action = item
+                item.setVisible(False)
         view.addSeparator()
         self.follow = view.addAction("Follow vehicle")
         self.follow.setCheckable(True)
@@ -742,7 +744,25 @@ class Window(QMainWindow):
             self.app_snapshot is None
             or (snap is not None and snap.state == "idle" and not snap.mission_adapter_online)
         )
-        self.fsm_panel.display(snap, ready, idle)
+        fresh_sim = False
+        view = self.sim_view
+        if view.job:
+            running_sim = bool(snap and snap.job_id == view.job and snap.state == "running")
+            fresh_sim = running_sim and 0 <= time.time_ns()//1_000_000 - view.stamp < 3000
+            phase = self.fsm_panel.states.get(view.code, ("Unknown phase", ""))[0]
+            state = snap.state.capitalize() if snap and snap.job_id == view.job else "Status unavailable"
+            view.phase.setText(f"Simulation · {phase if fresh_sim else state}")
+            view.detail.setText(
+                f"Targets remaining: {view.queued}   ·   Heading: {view.plot.trace['fixes'][-1][3]}°   ·   Local metres" if fresh_sim else
+                "Waiting for a current simulation sample" if running_sim else "Last received simulation track"
+            )
+            if view.plot.show_robot != fresh_sim:
+                view.plot.show_robot = fresh_sim
+                view.plot.update()
+        if view.job and self.fsm_panel.source.currentIndex() == 1:
+            self.fsm_panel.display_simulation(view.code if fresh_sim else 0, view.stamp)
+        else:
+            self.fsm_panel.display(snap, ready, idle)
         pose = self.track.current() if ready else None
         values = ["—", "—", "—"]
         if snap:
@@ -770,6 +790,7 @@ class Window(QMainWindow):
         self.job_label.setText(
             "Waiting for Jetson confirmation"
             if pending
+            else self.sim_view.phase.text() if snap and snap.detail.startswith("sim1:")
             else f"{snap.state.capitalize()}  {snap.detail}"
             if snap
             else "Waiting for current Jetson status"
@@ -958,6 +979,11 @@ class Window(QMainWindow):
         self.track = LocationTrack()
         self.app_snapshot = None
         self.pending_until = 0
+        self.sim_view.reset()
+        self.tabs.setTabVisible(self.sim_tab, False)
+        self.fsm_panel.source.setCurrentIndex(0)
+        self.fsm_panel.source.hide()
+        self.sim_map_action.setVisible(False)
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1141,12 +1167,26 @@ class Window(QMainWindow):
                                 and (self.pending_op == "start" or msg.state != "running")
                             ):
                                 self.pending_until = 0
+                            if msg.state == "running" and msg.job_id:
+                                if self.sim_view.job != msg.job_id:
+                                    self.sim_view.reset()
+                                    self.sim_view.job = msg.job_id
+                                    self.sim_view.plot.obstacles = OBSTACLES_XY if msg.app == "nav2-demo" else ()
+                                    self.tabs.setTabVisible(self.sim_tab, True)
+                                    self.sim_map_action.setVisible(True)
+                                    self.fsm_panel.source.show()
+                                    if not self.station.operating:
+                                        self.fsm_panel.source.setCurrentIndex(1)
+                                        self.tabs.setCurrentWidget(self.sim_view)
+                                        self.apps_dialog.hide()
+                                if self.sim_view.accept(msg, stamp):
+                                    self.journal.log("sim_preview", msg.detail, job_id=msg.job_id)
                             if previous is None or (
                                 previous.job_id,
                                 previous.state,
-                                previous.detail,
-                            ) != (msg.job_id, msg.state, msg.detail):
-                                self.event_line(f"Jetson  ·  {msg.state}  {msg.detail}")
+                                previous.detail.split(":", 1)[0],
+                            ) != (msg.job_id, msg.state, msg.detail.split(":", 1)[0]):
+                                self.event_line(f"Jetson  ·  {msg.app} {msg.state}")
                                 self.journal.log(
                                     "app_status",
                                     msg.detail,
@@ -1220,6 +1260,11 @@ class Window(QMainWindow):
                 pass
         self.radio = self.journal = self.station = None
         self.track = LocationTrack()
+        self.sim_view.reset()
+        self.tabs.setTabVisible(self.sim_tab, False)
+        self.fsm_panel.source.setCurrentIndex(0)
+        self.fsm_panel.source.hide()
+        self.sim_map_action.setVisible(False)
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1307,7 +1352,7 @@ class Window(QMainWindow):
             and (not self.app_fresh() or not self.app_snapshot.mission_adapter_online)
         )
         self.start.setToolTip(
-            "Start the mission adapter on the Jetson first." if adapter_offline else ""
+            "Field session input is unavailable. Check the Jetson bringup profile and health." if adapter_offline else ""
         )
         self.start.setEnabled(
             ready
@@ -1363,12 +1408,21 @@ class Window(QMainWindow):
                 if x
             )
             if st and st.session
-            else "Jetson idle · mission adapter offline"
+            else f"Jetson simulation · {self.app_snapshot.state}"
+            if self.app_fresh() and self.app_snapshot.state in ("running", "stopping")
+            else "Field standby · mission inputs disabled"
+            if ready and adapter_offline and self.app_fresh() and self.app_snapshot.fsm_state
+            else "Waiting for mission adapter"
             if ready and adapter_offline
             else "No active session"
         )
         self.status.setToolTip(note or self.status.text())
-        self.phase_readout.setText(self.fsm_panel.current.text())
+        self.phase_readout.setText(
+            self.sim_view.phase.text() if self.sim_view.job and self.app_fresh() and self.app_snapshot.state == "running" and not st.operating
+            else self.fsm_panel.states.get(self.app_snapshot.fsm_state, ("Awaiting field state", ""))[0]
+            if self.sim_view.job and self.app_fresh()
+            else self.fsm_panel.current.text()
+        )
         active = st.active if st else ""
         # Selection reports and session snapshots arrive independently. The station
         # orders them by UGV stamp; review decisions still use the session's own ID.

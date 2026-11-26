@@ -25,6 +25,8 @@ class GroundTrack(QWidget):
         super().__init__()
         self.trace = trace
         self.elapsed = 0
+        self.obstacles = OBSTACLES_XY
+        self.show_robot = True
         self.setMinimumSize(360, 200)
         points = [row[1:3] for row in trace["fixes"]] + [trace["target"], *OBSTACLES_XY]
         self.bounds = [
@@ -59,10 +61,11 @@ class GroundTrack(QWidget):
             p.drawLine(0, py, self.width(), py)
         p.setPen(QColor("#436369"))
         p.drawText(14, 22, "N ↑    ·    1 m grid")
-        obstacle_point(p, QPointF(self.width() - 110, 17))
-        p.setPen(QColor("#563d15"))
-        p.drawText(self.width() - 97, 22, "Sim obstacle")
-        for xy in OBSTACLES_XY:
+        if self.obstacles:
+            obstacle_point(p, QPointF(self.width() - 110, 17))
+            p.setPen(QColor("#563d15"))
+            p.drawText(self.width() - 97, 22, "Sim obstacle")
+        for xy in self.obstacles:
             obstacle_point(p, project(*xy))
         p.setBrush(Qt.BrushStyle.NoBrush)
         fixes = [f for f in self.trace["fixes"] if f[0] <= self.elapsed]
@@ -78,7 +81,7 @@ class GroundTrack(QWidget):
             p.setBrush(QColor("#ffddbb"))
             p.drawEllipse(target, 6, 6)
             p.drawText(target + QPointF(9, -8), "FOD")
-        if fixes:
+        if fixes and self.show_robot:
             _, x, y, heading = fixes[-1]
             p.translate(project(x, y))
             p.setPen(QPen(QColor("white"), 2))
@@ -160,3 +163,61 @@ class DemoReplay(QDialog):
             self.pause()
         else:
             self.resume()
+
+
+class SimulationView(QWidget):
+    """Read-only samples from the currently supervised Jetson job, in local metres."""
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        self.phase = QLabel()
+        self.phase.setObjectName("heading")
+        self.detail = QLabel()
+        self.detail.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.phase)
+        layout.addWidget(self.detail)
+        self.plot = GroundTrack({"fixes": [], "target": (0, 0), "target_time": math.inf})
+        layout.addWidget(self.plot, 1)
+        self.reset()
+
+    def reset(self):
+        self.job = ""
+        self.stamp = self.code = 0
+        self.plot.trace["fixes"].clear()
+        self.plot.trace["target_time"] = math.inf
+        self.plot.bounds = [-1, 1, -1, 1]
+        self.plot.show_robot = False
+        self.plot.update()
+
+    def accept(self, msg, stamp):
+        if not msg.detail.startswith("sim1:") or len(msg.detail) > 133:
+            return False
+        try:
+            row = json.loads(msg.detail[5:])
+        except (ValueError, RecursionError):
+            return False
+        if (not isinstance(row, list) or len(row) not in (6, 8)
+                or any(type(v) is not int for v in row)
+                or not self.stamp < row[0] <= stamp // 1_000_000
+                or stamp // 1_000_000 - row[0] > 2500 or not 0 <= row[1] <= 255
+                or not 0 <= row[4] < 360 or not 0 <= row[5] <= 32
+                or any(abs(v) > 10000 for v in row[2:4] + row[6:])):
+            return False
+        self.stamp, self.code, x, y, heading, self.queued, *target = row
+        x, y = x / 100, y / 100
+        self.plot.elapsed = self.stamp
+        track = self.plot.trace
+        track["fixes"].append((self.stamp, x, y, heading))
+        del track["fixes"][:-2048]
+        points = [(x, y)]
+        track["target_time"] = math.inf
+        if target:
+            track["target"] = (target[0]/100, target[1]/100)
+            track["target_time"] = self.stamp
+            points.append(track["target"])
+        for x, y in points:
+            w, e, s, n = self.plot.bounds
+            self.plot.bounds = [min(w, x-.5), max(e, x+.5), min(s, y-.5), max(n, y+.5)]
+        self.plot.update()
+        return True

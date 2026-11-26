@@ -404,7 +404,8 @@ def test_health_colors_and_stale_reset(window):
     toggle = next(a for a in tools.actions() if a.text() == "Subsystem health")
     window.tabs.setCurrentWidget(window.fsm_panel)
     toggle.trigger()
-    assert panel.isVisible() and window.tabs.currentWidget() is window.fsm_panel
+    assert panel.isVisible() and isinstance(panel.window(), QDialog)
+    assert window.tabs.currentWidget() is window.fsm_panel
     toggle.trigger()
     assert not panel.isVisible()
     toggle.trigger()
@@ -889,3 +890,34 @@ def test_killed_tile_worker_preserves_map_and_radio(window, monkeypatch):
     assert not view.overview.isNull() and view.zoom == 17
     scroll(view, 120)
     assert view.zoom == 18
+
+def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
+    w = window
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    w.port.setCurrentText("fixture")
+    w.connect_radio()
+    w.radio.ready = True
+    status = w.codec.types["FieldStatus"]
+    stamp = w.codec.stamp()
+    ms = stamp.sec * 1000 + stamp.nanosec // 1_000_000
+    row = [ms, status.FSM_NAVIGATION_MODE, 150, -50, 45, 2, 300, -75]
+    msg = status(stamp, "a"*32, "nav2-demo", "running", "sim1:"+json.dumps(row),
+                 -1, -1, False, status.FSM_BRING_UP_SYSTEM, 0)
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    view = w.sim_view
+    assert w.tabs.currentWidget() is view and view.plot.trace["target"] == (3, -.75)
+    assert view.plot.trace["fixes"][-1][1:] == (1.5, -.5, 45)
+    assert w.runway.robot is None and not w.runway.tracks.fixes
+    assert w.fsm_panel.chart.active == "NAVIGATION_MODE"
+    w.fsm_panel.source.setCurrentIndex(0)
+    w.tick()
+    assert w.fsm_panel.chart.active == "BRING_UP_SYSTEM"
+    msg.detail = "sim1:" + json.dumps([ms+1, 4, 9999999, 50, 0, 0])
+    assert not view.accept(msg, (ms+2)*1_000_000)
+    w.app_received -= 4
+    w.tick()
+    assert not view.plot.show_robot and w.fsm_panel.chart.active is None
+    w.disconnect()
+    assert not w.tabs.isTabVisible(w.sim_tab) and not view.plot.trace["fixes"]

@@ -68,7 +68,7 @@ else:
         assert all(name in w.health_summary.text() for name in ("E-stop", "GNSS", "Battery"))
         w.health_details.click()
         assert w.health_panel.isVisible()
-        assert w.grab().save(str(w.journal.folder / "bench-faults.png"))
+        assert w.health_panel.window().grab().save(str(w.journal.folder / "bench-faults.png"))
         step_file.write_text("silent")
         check(2, 0, 0)
         step_file.write_text("healthy")

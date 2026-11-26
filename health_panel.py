@@ -1,10 +1,11 @@
 """Operator indications. All onboard states come from one latest-only status frame."""
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QLabel, QWidget
 
 # Text describes the evidence each green indication actually represents.
 PROBES = (
-    ("MISSION", "Mission FSM", "Reporting", "Halted", "Fresh FSM snapshot"),
+    ("MISSION", "Mission FSM", "Reporting", "Fault", "Fresh FSM snapshot"),
     ("NAV2", "Nav2", "Active", "Fault", "Navigation lifecycle manager reports active"),
     ("ODOMETRY", "Odometry", "Fresh", "Fault", "Fresh valid pose, orientation and velocity"),
     ("SCAN", "Spatial scan", "Fresh", "Fault", "Fresh scan containing usable ranges"),
@@ -45,7 +46,7 @@ class HealthPanel(QWidget):
         for index, (name, tip) in enumerate(names):
             widget = QLabel()
             widget.setToolTip(tip)
-            layout.addWidget(widget, index // 3, index % 3)
+            layout.addWidget(widget, index // 2, index % 2, Qt.AlignmentFlag.AlignLeft)
             self.rows[name] = widget
             self.indicate(name, 0, "Unknown")
 
@@ -85,15 +86,17 @@ class HealthPanel(QWidget):
         self.indicate("Jetson", 1 if snap else 0, "Reporting" if snap else "Unknown")
         battery = snap.battery_percent if snap else -1
         known = 0 <= battery <= 100
+        missing_level = 3 if snap and snap.mission_adapter_online else 0
         self.indicate(
             "Battery",
-            (2 if battery <= 20 else 1) if known else 0,
-            ("Low" if battery <= 20 else "Reporting") if known else "Unknown",
+            (2 if battery <= 20 else 1) if known else missing_level,
+            ("Low" if battery <= 20 else "Reporting") if known else ("No data" if snap else "Unknown"),
         )
         stop = snap.estop if snap else -1
         self.indicate(
-            "E-stop", {0: 1, 1: 3}.get(stop, 0), {0: "Released", 1: "Active"}.get(stop, "Unknown")
+            "E-stop", {0: 1, 1: 3}.get(stop, missing_level), {0: "Released", 1: "Active"}.get(stop, "No data" if snap else "Unknown")
         )
         for key, name, good, fault, _ in PROBES:
             state = (snap.health >> getattr(self.status_type, key)) & 3 if snap else 0
-            self.indicate(name, state, ("Unknown", good, "Degraded", fault)[state])
+            warning = "Not ready" if key == "NAV2" else "Degraded"
+            self.indicate(name, state, (("No report" if snap else "Unknown"), good, warning, fault)[state])
