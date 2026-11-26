@@ -31,6 +31,12 @@ def window(monkeypatch, tmp_path):
     widget.close()
 
 
+def scroll(widget, delta):
+    window = widget.window()
+    pos = widget.mapTo(window, widget.rect().center())
+    QTest.wheelEvent(window.windowHandle(), pos, QPoint(0, delta))
+
+
 def test_light_map_preview_without_radio(window):
     w = window
     assert QApplication.palette().color(QPalette.ColorRole.Base).lightness() > 230
@@ -44,7 +50,7 @@ def test_light_map_preview_without_radio(window):
     w.tick()
     assert w.runway.center == (40.25, 0.0) and not w.runway.targets
     zoom = w.runway.zoom
-    w.zoom_in.click()
+    scroll(w.runway, 120)
     assert w.runway.zoom == zoom + 1
     QTest.mousePress(w.runway, Qt.MouseButton.LeftButton, pos=QPoint(28, 28))
     QTest.mouseMove(w.runway, QPoint(68, 28))
@@ -449,11 +455,11 @@ def test_fsm_tab_follows_radio_and_clears_on_loss(window, monkeypatch):
     sample(kind.FSM_STANDBY_MODE)
     assert panel.current.text() == "Standby" and not panel.chart.inferred
     scale = panel.chart.transform().m11()
-    panel.zoom_in.click()
+    scroll(panel.chart.viewport(), 120)
     assert panel.chart.transform().m11() == pytest.approx(scale * 1.25)
     old = sample(kind.FSM_CLEANING_MODE)
     assert panel.chart.transform().m11() == pytest.approx(scale * 1.25)
-    panel.zoom_out.click()
+    scroll(panel.chart.viewport(), -120)
     assert panel.chart.transform().m11() == pytest.approx(scale)
     panel.fit.click()
     assert not panel.follow.isChecked()
@@ -858,7 +864,7 @@ def test_killed_tile_worker_preserves_map_and_radio(window, monkeypatch):
     station = window.station
     overview = Path(runway_map.__file__).parent / "demo/site-overview.jpg"
     monkeypatch.setattr(runway_map, "tile_url", lambda *args: QUrl.fromLocalFile(str(overview)))
-    window.zoom_out.click()
+    scroll(view, -120)
     key = ("Satellite", 17, 35646, 55108)
     view.wanted.add(key)
     view.fetch_visible()
@@ -869,5 +875,5 @@ def test_killed_tile_worker_preserves_map_and_radio(window, monkeypatch):
     window.tick()
     assert window.station is station and window.radio.ready
     assert not view.overview.isNull() and view.zoom == 17
-    window.zoom_in.click()
+    scroll(view, 120)
     assert view.zoom == 18

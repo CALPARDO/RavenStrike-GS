@@ -164,17 +164,6 @@ class FsmPanel(QWidget):
         bar.addStretch()
         bar.addWidget(QLabel("Dashed arrows · interrupts"))
         self.chart = Flowchart()
-        self.zoom_out = QPushButton("−")
-        self.zoom_in = QPushButton("+")
-        for button, factor, name in (
-            (self.zoom_out, 0.8, "Zoom out"),
-            (self.zoom_in, 1.25, "Zoom in"),
-        ):
-            button.setAccessibleName(name)
-            button.setToolTip(name)
-            button.setFixedWidth(35)
-            button.clicked.connect(lambda checked=False, f=factor: self.chart.zoom_by(f))
-            bar.addWidget(button)
         self.fit = QPushButton("Fit diagram")
         self.fit.clicked.connect(self.fit_diagram)
         bar.addWidget(self.fit)

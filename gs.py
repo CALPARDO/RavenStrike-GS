@@ -288,12 +288,6 @@ class Window(QMainWindow):
         self.fit_route = self.button(bar, "Fit route", self.fit_targets)
         for control in (self.locate, self.fit_route):
             control.setObjectName("mapTool")
-        self.zoom_out = self.button(bar, "−", lambda: self.runway.change_zoom(-1))
-        self.zoom_in = self.button(bar, "+", lambda: self.runway.change_zoom(1))
-        for button, name in [(self.zoom_out, "Zoom out"), (self.zoom_in, "Zoom in")]:
-            button.setFixedWidth(35)
-            button.setAccessibleName(name)
-            button.setToolTip(name)
         pane.addWidget(self.runway, 1)
         legend = QHBoxLayout()
         pane.addLayout(legend)
@@ -404,15 +398,8 @@ class Window(QMainWindow):
         pane.setContentsMargins(14, 12, 14, 12)
         self.inspector = label("Mission inspector", "heading")
         pane.addWidget(self.inspector)
-        phase_bar = QHBoxLayout()
-        pane.addLayout(phase_bar)
         self.phase_readout = label("", "phase")
-        phase_bar.addWidget(self.phase_readout, 1)
-        self.button(
-            phase_bar,
-            "Inspect FSM  ›",
-            lambda: self.tabs.setCurrentWidget(self.fsm_panel),
-        ).setObjectName("mapTool")
+        pane.addWidget(self.phase_readout)
         self.queue_caption = label("Target register", "section")
         pane.addWidget(self.queue_caption)
         self.tasks = QTableWidget(0, 2)
@@ -1381,8 +1368,6 @@ class Window(QMainWindow):
             self.runway.active = display_active
             self.runway.update()
         location = self.runway.center
-        self.zoom_out.setEnabled(bool(location and self.runway.zoom > 3))
-        self.zoom_in.setEnabled(bool(location and self.runway.zoom < 24))
         self.runway.setAccessibleDescription(
             f"WGS84   ·   Map center   {location[0]:.5f}°, {location[1]:.5f}°"
             if location
@@ -1622,7 +1607,9 @@ if __name__ == "__main__":
                 # exposes the edge of the bundled site image and requests online imagery.
                 window.resize(1400, 800)
                 app.processEvents()
-                QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+                QTest.wheelEvent(
+                    window.windowHandle(), view.mapTo(window, view.rect().center()), QPoint(0, -120)
+                )
                 assert view.zoom == SITE_ZOOM - 1
                 app.processEvents()
                 center = view.rect().center()
@@ -1632,7 +1619,9 @@ if __name__ == "__main__":
                 QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center + QPoint(360, 65))
                 assert view.center != SITE
                 wait_for_tile("Satellite", view.zoom)
-                QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+                QTest.wheelEvent(
+                    window.windowHandle(), view.mapTo(window, view.rect().center()), QPoint(0, -120)
+                )
                 wait_for_tile("Satellite", SITE_ZOOM - 2)
                 window.locate_site()
                 app.processEvents()
