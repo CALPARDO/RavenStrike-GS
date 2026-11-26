@@ -1,7 +1,6 @@
 """Online mission map with explicit site, target and vehicle controls."""
 
 import math
-from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -14,6 +13,7 @@ from PySide6.QtCore import (
     QUrl,
     QUrlQuery,
     Signal,
+    Slot,
 )
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import (
@@ -93,22 +93,37 @@ class RunwayMap(QWidget):
         self.selected = ""
         self.tracks = MapTracks()
         self.preview_location = self.drag = None
+        self.drag_moved = False
         self.zoom = SITE_ZOOM
         self.targets = {}
         self.target_name = TargetNames()
         self.active = ""
-        self.network = QNetworkAccessManager(self)
-        cache = QNetworkDiskCache(self)
-        cache.setCacheDirectory(
-            str(
-                Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation))
-                / "osm"
+        # Replays and the live map share one disk cache for the application lifetime.
+        app = QApplication.instance()
+        self.network = app.findChild(QNetworkAccessManager, "basemapNetwork")
+        if self.network is None:
+            self.network = QNetworkAccessManager(app)
+            self.network.setObjectName("basemapNetwork")
+            self.network.setAutoDeleteReplies(True)
+            cache = QNetworkDiskCache(self.network)
+            cache.setCacheDirectory(
+                str(
+                    Path(
+                        QStandardPaths.writableLocation(
+                            QStandardPaths.StandardLocation.CacheLocation
+                        )
+                    )
+                    / "osm"
+                )
             )
-        )
-        cache.setMaximumCacheSize(32 * 1024 * 1024)
-        self.network.setCache(cache)
+            cache.setMaximumCacheSize(32 * 1024 * 1024)
+            self.network.setCache(cache)
         self.tiles = {}
-        self.pending = set()
+        self.pending = {}
+        self.wanted = set()
+        self.fetch = QTimer(self)
+        self.fetch.setSingleShot(True)
+        self.fetch.timeout.connect(self.fetch_visible)
         self.failed = set()
         self.retry = QTimer(self)
         self.retry.setSingleShot(True)
@@ -191,8 +206,14 @@ class RunwayMap(QWidget):
         self.update()
 
     def load(self, key):
-        if key in self.pending or key in self.failed or len(self.pending) >= 12:
-            return
+        if key not in self.pending and key not in self.failed:
+            self.wanted.add(key)
+
+    def fetch_visible(self):
+        while self.wanted and len(self.pending) < 12:
+            self.fetch_tile(self.wanted.pop())
+
+    def fetch_tile(self, key):
         request = QNetworkRequest(tile_url(*key))
         request.setRawHeader(
             b"User-Agent", b"RavenStrike-GS/0.1 (runway debris research ground station)"
@@ -202,12 +223,16 @@ class RunwayMap(QWidget):
             QNetworkRequest.CacheLoadControl.PreferCache,
         )
         request.setTransferTimeout(20000)
-        self.pending.add(key)
         reply = self.network.get(request)
-        reply.finished.connect(partial(self.received, key, reply))
+        self.pending[key] = reply
+        reply.setProperty("tileKey", list(key))
+        reply.finished.connect(self.received)
 
-    def received(self, key, reply):
-        self.pending.discard(key)
+    @Slot()
+    def received(self):
+        reply = self.sender()
+        key = tuple(reply.property("tileKey"))
+        del self.pending[key]
         tile = QPixmap()
         if (
             reply.error() == QNetworkReply.NetworkError.NoError
@@ -221,7 +246,6 @@ class RunwayMap(QWidget):
             self.failed.add(key)
             if not self.retry.isActive():
                 self.retry.start(30_000)
-        reply.deleteLater()
         self.update()
 
     def reset_view(self):
@@ -229,6 +253,7 @@ class RunwayMap(QWidget):
         self.initial_view = True
         self.obstacles = ()
         self.preview_location = self.drag = None
+        self.drag_moved = False
         self.active = ""
         self.targets.clear()
         self.target_name = TargetNames()
@@ -250,31 +275,39 @@ class RunwayMap(QWidget):
 
     def mousePressEvent(self, event):
         if self.center and event.button() == Qt.MouseButton.LeftButton:
-            self.drag = (event.position(), self.pixel(*self.center))
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            pos = event.position()
+            # Keep plain coordinates. The native mouse event expires after this callback.
+            self.drag = (pos.x(), pos.y(), *self.pixel(*self.center))
+            self.drag_moved = False
+            event.accept()
 
     def mouseMoveEvent(self, event):
         if self.drag:
-            start, (x, y) = self.drag
-            delta = event.position() - start
-            if delta.manhattanLength() < QApplication.startDragDistance():
-                return
-            self.initial_view = False
-            self.panned.emit()
+            sx, sy, x, y = self.drag
+            dx, dy = event.position().x() - sx, event.position().y() - sy
+            if not self.drag_moved:
+                if abs(dx) + abs(dy) < QApplication.startDragDistance():
+                    return
+                self.drag_moved = True
+                self.initial_view = False
+                self.panned.emit()
             size = 256 * 2**self.zoom
-            y = max(0, min(1, (y - delta.y()) / size))
+            y = max(0, min(1, (y - dy) / size))
             self.center = (
                 math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y)))),
-                ((x - delta.x()) / size * 360) % 360 - 180,
+                ((x - dx) / size * 360) % 360 - 180,
             )
             self.update()
 
     def mouseReleaseEvent(self, event):
         if self.drag and event.button() == Qt.MouseButton.LeftButton:
-            start, (x, y) = self.drag
+            sx, sy, x, y = self.drag
             self.drag = None
             pos = event.position()
-            if (pos - start).manhattanLength() < QApplication.startDragDistance():
+            if (
+                not self.drag_moved
+                and abs(pos.x() - sx) + abs(pos.y() - sy) < QApplication.startDragDistance()
+            ):
                 nearest = min(
                     self.targets,
                     key=lambda key: (self.screen_point(self.targets[key]) - pos).manhattanLength(),
@@ -291,7 +324,7 @@ class RunwayMap(QWidget):
                     lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * fy))))
                     lon = (x + pos.x() - self.width() / 2) / size * 360 % 360 - 180
                     self.pointPicked.emit(lat, lon)
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
 
     def draw_tracks(self, painter):
         def stroke(segment, color, width, style):
@@ -358,7 +391,15 @@ class RunwayMap(QWidget):
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
     def paintEvent(self, event):
-        p = QPainter(self)
+        self.wanted.clear()
+        with QPainter(self) as painter:
+            self.draw_map(painter)
+        # Starting a network request can dispatch native events on a desktop.
+        # Do that only after Qt has finished painting this widget.
+        if self.wanted and len(self.pending) < 12 and not self.fetch.isActive():
+            self.fetch.start(0)
+
+    def draw_map(self, p):
         p.fillRect(self.rect(), QColor("#eaf1f0"))
         cx, cy = self.pixel(*self.center)
         left, top = round(cx - self.width() / 2), round(cy - self.height() / 2)

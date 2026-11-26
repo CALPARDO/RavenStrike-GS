@@ -51,19 +51,7 @@ jobs:
             --hidden-import rosbags.serde.primitives --copy-metadata rosbags --copy-metadata rfd_bridge \
             --exclude-module tkinter --exclude-module pytest gs.py
       - name: Smoke-test packaged application
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import subprocess, sys
-          binary = {
-              'darwin': 'RavenStrike-GS.app/Contents/MacOS/RavenStrike-GS',
-              'win32': 'RavenStrike-GS/RavenStrike-GS.exe',
-              'linux': 'RavenStrike-GS/RavenStrike-GS',
-          }[sys.platform]
-          subprocess.run([Path('dist', binary).resolve(), '--self-test'], check=True, timeout=90)
-          PY
+        run: python tests/packaged_smoke.py
       - name: Archive application
         env:
           PLATFORM: ${{ matrix.platform }}

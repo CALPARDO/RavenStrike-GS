@@ -1,5 +1,6 @@
 """Run the field ground station with python gs.py. Nothing transmits on startup."""
 
+import faulthandler
 import json
 import math
 import queue
@@ -563,7 +564,8 @@ class Window(QMainWindow):
         self.follow.setChecked(self.settings.value("follow", False, type=bool))
         self.follow.toggled.connect(lambda checked: self.locate_robot() if checked else None)
         self.runway.panned.connect(lambda: self.follow.setChecked(False))
-        action(view, "Fit route and targets", self.fit_targets)
+        self.fit_route.action.setText("Fit route and targets")
+        view.addAction(self.fit_route.action)
         self.site_action = action(view, "Center on demo site", self.locate_site)
         action(view, "Restore default layout", self.restore_layout)
 
@@ -726,7 +728,11 @@ class Window(QMainWindow):
 
     def update_cockpit(self, ready):
         snap = self.app_snapshot if ready and self.app_fresh() else None
-        self.fsm_panel.display(snap, ready)
+        idle = not (self.station and self.station.session) and (
+            self.app_snapshot is None
+            or (snap is not None and snap.state == "idle" and not snap.mission_adapter_online)
+        )
+        self.fsm_panel.display(snap, ready, idle)
         pose = self.track.current() if ready else None
         values = ["—", "—", "—"]
         if snap:
@@ -1552,6 +1558,23 @@ class Window(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("RavenStrike-GS")
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        try:
+            logs = (
+                Path(
+                    QStandardPaths.writableLocation(
+                        QStandardPaths.StandardLocation.AppLocalDataLocation
+                    )
+                )
+                / "logs"
+            )
+            logs.mkdir(parents=True, exist_ok=True)
+            crash_log = (logs / "desktop-crash.log").open("a", encoding="utf-8", buffering=1)
+            if sys.stderr is None:
+                sys.stderr = crash_log
+            faulthandler.enable(crash_log)
+        except OSError:
+            pass
     window = Window()
     window.show()
     if "--self-test" in sys.argv:
@@ -1561,6 +1584,45 @@ if __name__ == "__main__":
             raise RuntimeError("Packaged build ID is missing")
         if window.runway.overview.isNull() or window.runway.layer != "Satellite":
             raise RuntimeError("Packaged satellite site overview is unavailable")
+        if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":
+            from PySide6.QtCore import QPoint
+            from PySide6.QtTest import QTest
+
+            import runway_map
+
+            # The build test hosts a PNG over loopback. Exercise the complete Qt fetch/decode path.
+            runway_map.tile_url = lambda layer, z, x, y: QUrl(
+                f"{sys.argv[2]}?tile={layer}-{z}-{x}-{y}"
+            )
+            view = window.runway
+            buttons = {btn.text(): btn for btn in window.findChildren(QPushButton, "layerButton")}
+            center = view.rect().center()
+            QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
+            QTest.mouseMove(view, center + QPoint(80, 20))
+            QTest.qWait(50)
+            assert view.center != SITE
+            QTest.mouseMove(view, center)
+            QTest.qWait(50)
+            QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center)
+            assert not window.draft_dialog.isVisible()
+            QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=center)
+            assert window.draft_dialog.isVisible()
+            window.draft_dialog.close()
+            for _ in range(4):
+                QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
+                before = view.center
+                QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
+                offset = center + QPoint(70, 25)
+                QTest.mouseMove(view, offset)
+                QTest.qWait(50)
+                QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=offset)
+                assert view.center != before
+                QTest.mouseClick(buttons["Satellite"], Qt.MouseButton.LeftButton)
+            QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
+            until = time.monotonic() + 12
+            while not any(key[0] == "Street" for key in view.tiles) and time.monotonic() < until:
+                QTest.qWait(30)
+            assert any(key[0] == "Street" for key in view.tiles), "Street tile failed to load"
         replay = DemoReplay(window)
         replay.slider.setValue(replay.slider.maximum())
         if replay.phase.text() != "Mission complete at base":

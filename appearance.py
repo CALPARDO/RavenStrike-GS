@@ -22,6 +22,10 @@ def field_theme(app):
         "ToolTipText": "#192f36",
     }.items():
         palette.setColor(getattr(QPalette.ColorRole, role), QColor(color))
+    for role in ("Text", "WindowText", "ButtonText"):
+        palette.setColor(
+            QPalette.ColorGroup.Disabled, getattr(QPalette.ColorRole, role), QColor("#858e93")
+        )
     app.setPalette(palette)
     app.setStyleSheet("""
         QWidget { color: #192f36; }
@@ -41,7 +45,8 @@ def field_theme(app):
         QWidget[pending="true"] { background-color: #fff3da; }
         QSplitter::handle { background-color: #d3dfe0; }
         QMenu { background: white; }
-        QMenu::item:selected { background-color: #d8eeea; color: #134e47; }
+        QMenu::item:disabled, QMenu::item:disabled:selected, QMenuBar::item:disabled { color: #858e93; background: transparent; }
+        QMenu::item:enabled:selected { background-color: #d8eeea; color: #134e47; }
         QFrame#footer { border-top: 1px solid #cedadd; }
         QFrame#card, QTabWidget::pane { border: 1px solid #cedadd; border-radius: 7px; }
         QLabel#brand { font-size: 21px; font-weight: 700; color: #f3fbfb; }

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +59,12 @@ class Flowchart(QGraphicsView):
         self.nodes = {g.get("id"): g for g in self.root.findall(".//{*}g[@class='node']")}
         self.active = None
         self.follow = True
+        self.inferred = False
+        self.manual_zoom = False
+        # fitInView during resize must not toggle scrollbars and re-enter resizeEvent.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.load_svg()
         self.item.setSharedRenderer(self.renderer)
         self.scene().addItem(self.item)
@@ -68,14 +75,17 @@ class Flowchart(QGraphicsView):
         if not self.renderer.load(QByteArray(ET.tostring(self.root))):
             raise ValueError("Unable to load the mission flowchart")
 
-    def highlight(self, state):
-        if self.active == state:
+    def highlight(self, state, inferred=False):
+        if self.active == state and self.inferred == inferred:
             return
+        self.inferred = inferred
         for name in (self.active, state):
             if name is None:
                 continue
             selected = name == state
             color = "#a03832" if name == "HALTED" else "#09685f"
+            if selected and inferred:
+                color = "#506773"
             for elem in self.nodes[name]:
                 tag = elem.tag.split("}")[-1]
                 if tag in ("ellipse", "polygon"):
@@ -91,11 +101,27 @@ class Flowchart(QGraphicsView):
 
     def set_follow(self, enabled):
         self.follow = enabled
+        self.manual_zoom = False
         self.frame_chart()
+
+    def zoom_by(self, factor):
+        scale = self.transform().m11()
+        target = min(6.0, max(0.04, scale * factor))
+        self.manual_zoom = True
+        self.scale(target / scale, target / scale)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta:
+            self.zoom_by(1.25 ** max(-4, min(4, delta / 120)))
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def frame_chart(self):
         if self.follow and self.active:
-            self.resetTransform()
+            if not self.manual_zoom:
+                self.resetTransform()
             bounds = self.renderer.boundsOnElement(self.active)
             center = self.renderer.transformForElement(self.active).map(bounds.center())
             box = self.renderer.viewBoxF()
@@ -104,7 +130,7 @@ class Flowchart(QGraphicsView):
                 (center.x() - box.x()) * rect.width() / box.width(),
                 (center.y() - box.y()) * rect.height() / box.height(),
             )
-        else:
+        elif not self.manual_zoom:
             self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def resizeEvent(self, event):
@@ -138,18 +164,43 @@ class FsmPanel(QWidget):
         bar.addStretch()
         bar.addWidget(QLabel("Dashed arrows · interrupts"))
         self.chart = Flowchart()
+        self.zoom_out = QPushButton("−")
+        self.zoom_in = QPushButton("+")
+        for button, factor, name in (
+            (self.zoom_out, 0.8, "Zoom out"),
+            (self.zoom_in, 1.25, "Zoom in"),
+        ):
+            button.setAccessibleName(name)
+            button.setToolTip(name)
+            button.setFixedWidth(35)
+            button.clicked.connect(lambda checked=False, f=factor: self.chart.zoom_by(f))
+            bar.addWidget(button)
+        self.fit = QPushButton("Fit diagram")
+        self.fit.clicked.connect(self.fit_diagram)
+        bar.addWidget(self.fit)
         self.follow.toggled.connect(self.chart.set_follow)
         layout.addWidget(self.chart, 1)
         self.sample = None
         self.display(None, False)
 
-    def display(self, snap, connected):
+    def fit_diagram(self):
+        self.follow.setChecked(False)
+        self.chart.manual_zoom = False
+        self.chart.frame_chart()
+
+    def display(self, snap, connected, idle=False):
         code = snap.fsm_state if snap else 0
-        sample = (connected, code, (snap.stamp.sec, snap.stamp.nanosec) if snap else None)
+        standby = connected and idle and code == 0
+        sample = (connected, standby, code, (snap.stamp.sec, snap.stamp.nanosec) if snap else None)
         if sample == self.sample:
             return
         self.sample = sample
         phase, name = self.states.get(code, (None, None))
+        if standby:
+            self.current.setText("Radio standby")
+            self.detail.setText("Link ready · awaiting onboard mission state")
+            self.chart.highlight("STANDBY_MODE", inferred=True)
+            return
         self.current.setText(phase or "FSM unavailable")
         if snap:
             stamp = eastern(snap.stamp.sec) + " ET"

@@ -443,7 +443,21 @@ def test_fsm_tab_follows_radio_and_clears_on_loss(window, monkeypatch):
         w.tick()
         return msg
 
+    w.tick()
+    assert panel.current.text() == "Radio standby" and panel.chart.active == "STANDBY_MODE"
+    assert panel.chart.inferred and "awaiting onboard" in panel.detail.text()
+    sample(kind.FSM_STANDBY_MODE)
+    assert panel.current.text() == "Standby" and not panel.chart.inferred
+    scale = panel.chart.transform().m11()
+    panel.zoom_in.click()
+    assert panel.chart.transform().m11() == pytest.approx(scale * 1.25)
     old = sample(kind.FSM_CLEANING_MODE)
+    assert panel.chart.transform().m11() == pytest.approx(scale * 1.25)
+    panel.zoom_out.click()
+    assert panel.chart.transform().m11() == pytest.approx(scale)
+    panel.fit.click()
+    assert not panel.follow.isChecked()
+    panel.follow.click()
     sample(kind.FSM_OK_TO_MOVE_FORWARD)
     w.radio.receive(24, w.codec.encode(old))
     w.tick()
@@ -801,3 +815,26 @@ def test_obstacles_follow_demo_session_in_recording(window, tmp_path):
                 dialog.map.rect().contains(dialog.map.screen_point(pt).toPoint()) for pt in expected
             )
     dialog.close()
+
+
+def test_disabled_menu_text_is_visibly_lighter(window):
+    from PySide6.QtWidgets import QMenu
+
+    menu = QMenu(window)
+    enabled = menu.addAction("Mission command")
+    disabled = menu.addAction("Mission command")
+    disabled.setEnabled(False)
+    menu.ensurePolished()
+    menu.resize(menu.sizeHint())
+    image = menu.grab().toImage()
+
+    def darkest_text(action):
+        area = menu.actionGeometry(action).adjusted(4, 2, -4, -2)
+        return min(
+            image.pixelColor(x, y).lightness()
+            for x in range(area.left(), area.right())
+            for y in range(area.top(), area.bottom())
+        )
+
+    assert darkest_text(disabled) >= darkest_text(enabled) + 45
+    assert not window.fit_route.action.isEnabled()
