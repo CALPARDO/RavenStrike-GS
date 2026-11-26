@@ -1590,13 +1590,40 @@ if __name__ == "__main__":
 
             import runway_map
 
-            # The build test hosts a PNG over loopback. Exercise the complete Qt fetch/decode path.
-            runway_map.tile_url = lambda layer, z, x, y: QUrl(
-                f"{sys.argv[2]}?tile={layer}-{z}-{x}-{y}"
-            )
+            # The build test serves separate JPEG imagery and PNG street tiles over loopback.
+            if sys.argv[2] != "online":
+                runway_map.tile_url = lambda layer, z, x, y: QUrl(
+                    f"{sys.argv[2]}/tile.{'jpg' if layer == 'Satellite' else 'png'}?tile={z}-{x}-{y}"
+                )
             view = window.runway
             buttons = {btn.text(): btn for btn in window.findChildren(QPushButton, "layerButton")}
             center = view.rect().center()
+
+            def wait_for_tile(layer, zoom):
+                until = time.monotonic() + 15
+                while time.monotonic() < until:
+                    if any(key[:2] == (layer, zoom) for key in view.tiles):
+                        return
+                    QTest.qWait(30)
+                raise RuntimeError(f"{layer} tile failed at zoom {zoom}")
+
+            # Start with the reported gesture. At this width a single zoom-out
+            # exposes the edge of the bundled site image and requests online imagery.
+            window.resize(1400, 800)
+            app.processEvents()
+            QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+            assert view.zoom == SITE_ZOOM - 1
+            wait_for_tile("Satellite", view.zoom)
+            center = view.rect().center()
+            QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
+            QTest.mouseMove(view, center + QPoint(360, 65))
+            QTest.qWait(80)
+            QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center + QPoint(360, 65))
+            assert view.center != SITE
+            QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+            wait_for_tile("Satellite", SITE_ZOOM - 2)
+            window.locate_site()
+            app.processEvents()
             QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
             QTest.mouseMove(view, center + QPoint(80, 20))
             QTest.qWait(50)
@@ -1619,10 +1646,7 @@ if __name__ == "__main__":
                 assert view.center != before
                 QTest.mouseClick(buttons["Satellite"], Qt.MouseButton.LeftButton)
             QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
-            until = time.monotonic() + 12
-            while not any(key[0] == "Street" for key in view.tiles) and time.monotonic() < until:
-                QTest.qWait(30)
-            assert any(key[0] == "Street" for key in view.tiles), "Street tile failed to load"
+            wait_for_tile("Street", view.zoom)
         replay = DemoReplay(window)
         replay.slider.setValue(replay.slider.maximum())
         if replay.phase.text() != "Mission complete at base":

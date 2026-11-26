@@ -6,6 +6,11 @@ on:
     branches: [main]
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      online_windows_map:
+        description: Exercise the packaged Windows map with live imagery providers
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +57,20 @@ jobs:
             --exclude-module tkinter --exclude-module pytest gs.py
       - name: Smoke-test packaged application
         run: python tests/packaged_smoke.py
+      - name: Check Windows map with live satellite and street tiles
+        if: runner.os == 'Windows' && inputs.online_windows_map
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "windows"
+          $app = Start-Process "dist/RavenStrike-GS/RavenStrike-GS.exe" -ArgumentList "--self-test","online" -PassThru
+          if (-not $app.WaitForExit(90000)) {
+            $app.Kill()
+            throw "Online map check timed out"
+          }
+          if ($app.ExitCode -ne 0) {
+            Get-Content "$env:LOCALAPPDATA/RavenStrike-GS/logs/desktop-crash.log" -Tail 60 -ErrorAction SilentlyContinue
+            throw "Online map check failed ($($app.ExitCode))"
+          }
       - name: Archive application
         env:
           PLATFORM: ${{ matrix.platform }}
