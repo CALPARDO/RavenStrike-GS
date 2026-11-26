@@ -10,6 +10,12 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+# The frozen executable also hosts the map worker. It opens no window or radio.
+if __name__ == "__main__" and sys.argv[1:2] == ["--fetch-map-tiles"]:
+    from map_tiles import main as fetch_map_tiles
+
+    sys.exit(fetch_map_tiles(sys.argv[2]))
+
 from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
@@ -1552,6 +1558,7 @@ class Window(QMainWindow):
             return
         self.settings.setValue("splitter", self.splitter.saveState())
         self.disconnect()
+        self.runway.stop_tiles()
         event.accept()
 
 
@@ -1578,97 +1585,113 @@ if __name__ == "__main__":
     window = Window()
     window.show()
     if "--self-test" in sys.argv:
-        # Exercise the packaged GUI, wire map and dynamically loaded CDR store offline.
-        app.processEvents()
-        if getattr(sys, "frozen", False) and window.build == "unknown":
-            raise RuntimeError("Packaged build ID is missing")
-        if window.runway.overview.isNull() or window.runway.layer != "Satellite":
-            raise RuntimeError("Packaged satellite site overview is unavailable")
-        if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":
-            from PySide6.QtCore import QPoint
-            from PySide6.QtTest import QTest
 
-            import runway_map
-
-            # The build test serves separate JPEG imagery and PNG street tiles over loopback.
-            if sys.argv[2] != "online":
-                runway_map.tile_url = lambda layer, z, x, y: QUrl(
-                    f"{sys.argv[2]}/tile.{'jpg' if layer == 'Satellite' else 'png'}?tile={z}-{x}-{y}"
-                )
-            view = window.runway
-            buttons = {btn.text(): btn for btn in window.findChildren(QPushButton, "layerButton")}
-            center = view.rect().center()
-
-            def wait_for_tile(layer, zoom):
-                until = time.monotonic() + 15
-                while time.monotonic() < until:
-                    if any(key[:2] == (layer, zoom) for key in view.tiles):
-                        return
-                    QTest.qWait(30)
-                raise RuntimeError(f"{layer} tile failed at zoom {zoom}")
-
-            # Start with the reported gesture. At this width a single zoom-out
-            # exposes the edge of the bundled site image and requests online imagery.
-            window.resize(1400, 800)
+        def check_package():
+            # Exercise the packaged GUI, wire map and dynamically loaded CDR store offline.
             app.processEvents()
-            QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
-            assert view.zoom == SITE_ZOOM - 1
-            wait_for_tile("Satellite", view.zoom)
-            center = view.rect().center()
-            QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
-            QTest.mouseMove(view, center + QPoint(360, 65))
-            QTest.qWait(80)
-            QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center + QPoint(360, 65))
-            assert view.center != SITE
-            QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
-            wait_for_tile("Satellite", SITE_ZOOM - 2)
-            window.locate_site()
-            app.processEvents()
-            QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
-            QTest.mouseMove(view, center + QPoint(80, 20))
-            QTest.qWait(50)
-            assert view.center != SITE
-            QTest.mouseMove(view, center)
-            QTest.qWait(50)
-            QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center)
-            assert not window.draft_dialog.isVisible()
-            QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=center)
-            assert window.draft_dialog.isVisible()
-            window.draft_dialog.close()
-            for _ in range(4):
-                QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
-                before = view.center
+            if getattr(sys, "frozen", False) and window.build == "unknown":
+                raise RuntimeError("Packaged build ID is missing")
+            if window.runway.overview.isNull() or window.runway.layer != "Satellite":
+                raise RuntimeError("Packaged satellite site overview is unavailable")
+            if len(sys.argv) >= 3 and sys.argv[1] == "--self-test":
+                from PySide6.QtCore import QPoint
+                from PySide6.QtTest import QTest
+
+                import runway_map
+
+                # The build test serves separate JPEG imagery and PNG street tiles over loopback.
+                if sys.argv[2] != "online":
+                    runway_map.tile_url = lambda layer, z, x, y: QUrl(
+                        f"{sys.argv[2]}/tile.{'jpg' if layer == 'Satellite' else 'png'}?tile={z}-{x}-{y}"
+                    )
+                view = window.runway
+                buttons = {
+                    btn.text(): btn for btn in window.findChildren(QPushButton, "layerButton")
+                }
+                center = view.rect().center()
+
+                def wait_for_tile(layer, zoom):
+                    until = time.monotonic() + 15
+                    while time.monotonic() < until:
+                        if any(key[:2] == (layer, zoom) for key in view.tiles):
+                            return
+                        QTest.qWait(30)
+                    raise RuntimeError(f"{layer} tile failed at zoom {zoom}")
+
+                # Start with the reported gesture. At this width a single zoom-out
+                # exposes the edge of the bundled site image and requests online imagery.
+                window.resize(1400, 800)
+                app.processEvents()
+                QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+                assert view.zoom == SITE_ZOOM - 1
+                app.processEvents()
+                center = view.rect().center()
                 QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
-                offset = center + QPoint(70, 25)
-                QTest.mouseMove(view, offset)
+                QTest.mouseMove(view, center + QPoint(360, 65))
+                QTest.qWait(80)
+                QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center + QPoint(360, 65))
+                assert view.center != SITE
+                wait_for_tile("Satellite", view.zoom)
+                QTest.mouseClick(window.zoom_out, Qt.MouseButton.LeftButton)
+                wait_for_tile("Satellite", SITE_ZOOM - 2)
+                window.locate_site()
+                app.processEvents()
+                QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
+                QTest.mouseMove(view, center + QPoint(80, 20))
                 QTest.qWait(50)
-                QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=offset)
-                assert view.center != before
-                QTest.mouseClick(buttons["Satellite"], Qt.MouseButton.LeftButton)
-            QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
-            wait_for_tile("Street", view.zoom)
-        replay = DemoReplay(window)
-        replay.slider.setValue(replay.slider.maximum())
-        if replay.phase.text() != "Mission complete at base":
-            raise RuntimeError("Packaged demo recording is incomplete")
-        replay.close()
-        radio = Radio("", window.codec)
-        task = window.codec.gps("offline", "fod-1", "UGV-1", 1.0, 2.0, 0.0)
-        if window.codec.decode(window.codec.encode(task), task.__msgtype__) != task:
-            raise RuntimeError("Packaged GPS task failed the CDR round trip")
-        location = window.codec.types["RobotLocation"](window.codec.stamp(), 0, 0, 65535)
-        if (
-            window.codec.decode(window.codec.encode(location), radio.engine.topics[20].type)
-            != location
-        ):
-            raise RuntimeError("Packaged robot location failed the CDR round trip")
-        launch = window.codec.types["AppCommand"](
-            window.codec.stamp(), "a" * 32, "start", "scenario", "retry", False
-        )
-        if window.codec.decode(window.codec.encode(launch), radio.engine.topics[21].type) != launch:
-            raise RuntimeError("Packaged app command failed the CDR round trip")
-        if window.launch_app.isEnabled() or window.submit.isEnabled() or radio.ready:
-            raise RuntimeError("Disconnected station accepted mission input")
-        window.close()
+                assert view.center != SITE
+                QTest.mouseMove(view, center)
+                QTest.qWait(50)
+                QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=center)
+                assert not window.draft_dialog.isVisible()
+                QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=center)
+                assert window.draft_dialog.isVisible()
+                window.draft_dialog.close()
+                for _ in range(4):
+                    QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
+                    before = view.center
+                    QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=center)
+                    offset = center + QPoint(70, 25)
+                    QTest.mouseMove(view, offset)
+                    QTest.qWait(50)
+                    QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=offset)
+                    assert view.center != before
+                    QTest.mouseClick(buttons["Satellite"], Qt.MouseButton.LeftButton)
+                QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
+                wait_for_tile("Street", view.zoom)
+            replay = DemoReplay(window)
+            replay.slider.setValue(replay.slider.maximum())
+            if replay.phase.text() != "Mission complete at base":
+                raise RuntimeError("Packaged demo recording is incomplete")
+            replay.close()
+            radio = Radio("", window.codec)
+            task = window.codec.gps("offline", "fod-1", "UGV-1", 1.0, 2.0, 0.0)
+            if window.codec.decode(window.codec.encode(task), task.__msgtype__) != task:
+                raise RuntimeError("Packaged GPS task failed the CDR round trip")
+            location = window.codec.types["RobotLocation"](window.codec.stamp(), 0, 0, 65535)
+            if (
+                window.codec.decode(window.codec.encode(location), radio.engine.topics[20].type)
+                != location
+            ):
+                raise RuntimeError("Packaged robot location failed the CDR round trip")
+            launch = window.codec.types["AppCommand"](
+                window.codec.stamp(), "a" * 32, "start", "scenario", "retry", False
+            )
+            if (
+                window.codec.decode(window.codec.encode(launch), radio.engine.topics[21].type)
+                != launch
+            ):
+                raise RuntimeError("Packaged app command failed the CDR round trip")
+            if window.launch_app.isEnabled() or window.submit.isEnabled() or radio.ready:
+                raise RuntimeError("Disconnected station accepted mission input")
+            window.close()
+
+        try:
+            check_package()
+        except (AssertionError, RuntimeError, OSError, ValueError):
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+            sys.exit(1)
     else:
         sys.exit(app.exec())

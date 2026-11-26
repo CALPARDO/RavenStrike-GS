@@ -1,31 +1,28 @@
 """Online mission map with explicit site, target and vehicle controls."""
 
+import json
 import math
+import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from PySide6.QtCore import (
     QPointF,
+    QProcess,
     QRect,
     QRectF,
-    QStandardPaths,
     Qt,
     QTimer,
     QUrl,
     QUrlQuery,
     Signal,
-    Slot,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtNetwork import (
-    QNetworkAccessManager,
-    QNetworkDiskCache,
-    QNetworkReply,
-    QNetworkRequest,
-)
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QWidget,
 )
@@ -88,7 +85,7 @@ class RunwayMap(QWidget):
         self.robot = self.last_known = None
         self.obstacles = ()
         self.layer = "Satellite"
-        self.overview = QPixmap(str(Path(__file__).resolve().parent / "demo" / "site-overview.jpg"))
+        self.overview = QImage(str(Path(__file__).resolve().parent / "demo" / "site-overview.jpg"))
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.selected = ""
         self.tracks = MapTracks()
@@ -98,28 +95,18 @@ class RunwayMap(QWidget):
         self.targets = {}
         self.target_name = TargetNames()
         self.active = ""
-        # Replays and the live map share one disk cache for the application lifetime.
-        app = QApplication.instance()
-        self.network = app.findChild(QNetworkAccessManager, "basemapNetwork")
-        if self.network is None:
-            self.network = QNetworkAccessManager(app)
-            self.network.setObjectName("basemapNetwork")
-            self.network.setAutoDeleteReplies(True)
-            cache = QNetworkDiskCache(self.network)
-            cache.setCacheDirectory(
-                str(
-                    Path(
-                        QStandardPaths.writableLocation(
-                            QStandardPaths.StandardLocation.CacheLocation
-                        )
-                    )
-                    / "osm"
-                )
-            )
-            cache.setMaximumCacheSize(32 * 1024 * 1024)
-            self.network.setCache(cache)
+        self.attribution = QLabel(self)
+        self.attribution.setStyleSheet("background: white; color: #365851; padding: 2px 6px;")
+        self.attribution.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.tiles = {}
-        self.pending = {}
+        self.pending = ()
+        self.batch = None
+        self.worker = QProcess(self)
+        self.worker.finished.connect(self.batch_finished)
+        self.worker.errorOccurred.connect(self.worker_error)
+        self.worker_guard = QTimer(self)
+        self.worker_guard.setSingleShot(True)
+        self.worker_guard.timeout.connect(self.worker.kill)
         self.wanted = set()
         self.fetch = QTimer(self)
         self.fetch.setSingleShot(True)
@@ -128,9 +115,11 @@ class RunwayMap(QWidget):
         self.retry = QTimer(self)
         self.retry.setSingleShot(True)
         self.retry.timeout.connect(self.retry_tiles)
+        self.update_attribution()
 
     def retry_tiles(self):
         self.failed.clear()
+        self.update_attribution()
         self.update()
 
     def layer_switch(self):
@@ -210,43 +199,75 @@ class RunwayMap(QWidget):
             self.wanted.add(key)
 
     def fetch_visible(self):
-        while self.wanted and len(self.pending) < 12:
-            self.fetch_tile(self.wanted.pop())
-
-    def fetch_tile(self, key):
-        request = QNetworkRequest(tile_url(*key))
-        request.setRawHeader(
-            b"User-Agent", b"RavenStrike-GS/0.1 (runway debris research ground station)"
+        if self.pending or not self.wanted:
+            return
+        self.pending = tuple(sorted(self.wanted)[:12])
+        self.wanted.clear()
+        try:
+            self.batch = TemporaryDirectory(prefix="ravenstrike-map-")
+            urls = [tile_url(*key).toString() for key in self.pending]
+            Path(self.batch.name, "urls.json").write_text(json.dumps(urls), encoding="utf-8")
+        except OSError:
+            self.batch_finished()
+            return
+        args = (
+            ["--fetch-map-tiles"]
+            if getattr(sys, "frozen", False)
+            else [str(Path(__file__).with_name("map_tiles.py"))]
         )
-        request.setAttribute(
-            QNetworkRequest.Attribute.CacheLoadControlAttribute,
-            QNetworkRequest.CacheLoadControl.PreferCache,
-        )
-        request.setTransferTimeout(20000)
-        reply = self.network.get(request)
-        self.pending[key] = reply
-        reply.setProperty("tileKey", list(key))
-        reply.finished.connect(self.received)
+        self.worker.start(sys.executable, [*args, self.batch.name])
+        self.worker_guard.start(30000)
 
-    @Slot()
-    def received(self):
-        reply = self.sender()
-        key = tuple(reply.property("tileKey"))
-        del self.pending[key]
-        tile = QPixmap()
-        if (
-            reply.error() == QNetworkReply.NetworkError.NoError
-            and tile.loadFromData(reply.readAll())
-            and tile.width() == tile.height() == 256
-        ):
-            if len(self.tiles) >= 96:
-                self.tiles.pop(next(iter(self.tiles)))
-            self.tiles[key] = tile
-        else:
-            self.failed.add(key)
-            if not self.retry.isActive():
-                self.retry.start(30_000)
+    def stop_tiles(self):
+        self.fetch.stop()
+        if self.worker.state() != QProcess.ProcessState.NotRunning:
+            self.worker.kill()
+            self.worker.waitForFinished(1000)
+        self.retry.stop()
+
+    def worker_error(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            self.batch_finished()
+
+    def batch_finished(self, *args):
+        self.worker_guard.stop()
+        for index, key in enumerate(self.pending):
+            try:
+                data = Path(self.batch.name, str(index)).read_bytes() if self.batch else b""
+            except OSError:
+                data = b""
+            if len(data) == 256 * 256 * 4:
+                # Workers return plain pixels. The image owns its buffer after this copy.
+                image = QImage(data, 256, 256, 1024, QImage.Format.Format_RGB32).copy()
+                if len(self.tiles) >= 96:
+                    self.tiles.pop(next(iter(self.tiles)))
+                self.tiles[key] = image
+            else:
+                self.failed.add(key)
+        if self.batch:
+            self.batch.cleanup()
+            self.batch = None
+        self.pending = ()
+        if self.failed and not self.retry.isActive():
+            self.retry.start(30000)
         self.update()
+
+    def update_attribution(self):
+        source = (
+            "USGS · The National Map / USDA NAIP"
+            if self.layer == "Satellite"
+            else "© OpenStreetMap contributors"
+        )
+        self.attribution.setText(source)
+        self.attribution.adjustSize()
+        self.attribution.move(
+            max(0, self.width() - self.attribution.width()),
+            max(0, self.height() - self.attribution.height()),
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_attribution()
 
     def reset_view(self):
         self.center, self.zoom = SITE, SITE_ZOOM
@@ -396,7 +417,7 @@ class RunwayMap(QWidget):
             self.draw_map(painter)
         # Starting a network request can dispatch native events on a desktop.
         # Do that only after Qt has finished painting this widget.
-        if self.wanted and len(self.pending) < 12 and not self.fetch.isActive():
+        if self.wanted and not self.pending and not self.fetch.isActive():
             self.fetch.start(0)
 
     def draw_map(self, p):
@@ -426,8 +447,8 @@ class RunwayMap(QWidget):
                     dst.height() / factor,
                 )
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-                p.drawPixmap(dst, self.overview, src)
-        missing = visible = False
+                p.drawImage(dst, self.overview, src)
+        missing = False
         for x in range(left // tile_size, (left + self.width()) // tile_size + 1):
             for y in range(
                 max(0, top // tile_size), min(tile_count, (top + self.height()) // tile_size + 1)
@@ -437,7 +458,6 @@ class RunwayMap(QWidget):
                 if self.zoom >= 17 and overview_rect.contains(
                     QRectF(tile_rect.intersected(self.rect()))
                 ):
-                    visible = True
                     # This area already has level-18 imagery.
                     if tile_zoom <= 18:
                         continue
@@ -445,8 +465,7 @@ class RunwayMap(QWidget):
                         self.load(key)
                         continue
                 if key in self.tiles:
-                    visible = True
-                    p.drawPixmap(
+                    p.drawImage(
                         QRect(x * tile_size - left, y * tile_size - top, tile_size, tile_size),
                         self.tiles[key],
                     )
@@ -458,14 +477,13 @@ class RunwayMap(QWidget):
                         parent = (self.layer, tile_zoom - levels, key[2] // scale, y // scale)
                         if parent in self.tiles:
                             part = 256 // scale
-                            p.drawPixmap(
+                            p.drawImage(
                                 QRect(
                                     x * tile_size - left, y * tile_size - top, tile_size, tile_size
                                 ),
                                 self.tiles[parent],
                                 QRect(key[2] % scale * part, y % scale * part, part, part),
                             )
-                            visible = True
                             break
                     self.load(key)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -525,18 +543,8 @@ class RunwayMap(QWidget):
         p.drawLine(15, y, 15 + pixels, y)
         p.drawLine(15, y - 4, 15, y)
         p.drawLine(15 + pixels, y - 4, 15 + pixels, y)
-        caption = (
-            "USGS · The National Map / USDA NAIP"
-            if self.layer == "Satellite"
-            else "© OpenStreetMap contributors"
-        )
         if missing:
-            caption = (
-                ("Some tiles unavailable" if visible else "Basemap unavailable")
-                + "   ·   "
-                + caption
-            )
-        width = p.fontMetrics().horizontalAdvance(caption) + 12
-        box = QRect(self.width() - width, self.height() - 21, width, 21)
-        p.fillRect(box, Qt.GlobalColor.white)
-        p.drawText(box, Qt.AlignmentFlag.AlignCenter, caption)
+            p.setPen(QColor("#365851"))
+            p.setBackground(Qt.GlobalColor.white)
+            p.setBackgroundMode(Qt.BGMode.OpaqueMode)
+            p.drawText(8, 18, "Some tiles unavailable")

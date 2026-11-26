@@ -71,6 +71,10 @@ jobs:
             Get-Content "$env:LOCALAPPDATA/RavenStrike-GS/logs/desktop-crash.log" -Tail 60 -ErrorAction SilentlyContinue
             throw "Online map check failed ($($app.ExitCode))"
           }
+      - name: Windows crash diagnostics
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: Get-Content "$env:LOCALAPPDATA/RavenStrike-GS/logs/desktop-crash.log" -Tail 80 -ErrorAction SilentlyContinue
       - name: Archive application
         env:
           PLATFORM: ${{ matrix.platform }}

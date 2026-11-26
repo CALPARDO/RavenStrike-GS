@@ -163,6 +163,7 @@ class JournalReplay(QDialog):
         toolbar = QHBoxLayout()
         toolbar.addWidget(title, 1)
         self.map = RunwayMap()
+        self.finished.connect(self.map.stop_tiles)
         toolbar.addWidget(self.map.layer_switch())
         layout.addLayout(toolbar)
         self.map.target_name = names

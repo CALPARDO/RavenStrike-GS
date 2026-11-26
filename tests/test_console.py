@@ -838,3 +838,36 @@ def test_disabled_menu_text_is_visibly_lighter(window):
 
     assert darkest_text(disabled) >= darkest_text(enabled) + 45
     assert not window.fit_route.action.isEnabled()
+
+
+def test_killed_tile_worker_preserves_map_and_radio(window, monkeypatch):
+    from pathlib import Path
+
+    from PySide6.QtCore import QUrl
+
+    import runway_map
+
+    view = window.runway
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "send", lambda *args: pytest.fail("Map sent a radio command"))
+    window.port.setCurrentText("fixture")
+    window.connect_radio()
+    window.radio.ready = True
+    window.tick()
+    station = window.station
+    overview = Path(runway_map.__file__).parent / "demo/site-overview.jpg"
+    monkeypatch.setattr(runway_map, "tile_url", lambda *args: QUrl.fromLocalFile(str(overview)))
+    window.zoom_out.click()
+    key = ("Satellite", 17, 35646, 55108)
+    view.wanted.add(key)
+    view.fetch_visible()
+    assert view.worker.waitForStarted(5000)
+    view.worker.kill()
+    assert view.worker.waitForFinished(5000)
+    assert key in view.failed and not view.pending and view.batch is None
+    window.tick()
+    assert window.station is station and window.radio.ready
+    assert not view.overview.isNull() and view.zoom == 17
+    window.zoom_in.click()
+    assert view.zoom == 18
