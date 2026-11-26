@@ -116,3 +116,9 @@ The 25 November 2026 wire v5 radio mission supplies the desktop demo recording. 
 Before field use, commission actual receiver settings, site coordinates, reach, physical link loss and manual stop on Lynx. Test installation and USB operation on each additional OS. Local logs and site evidence are gitignored.
 
 If the Windows desktop exits unexpectedly, its native fault trace, when available, is in `%LOCALAPPDATA%/RavenStrike-GS/logs/desktop-crash.log`.
+
+**Reading the live displays.** In **Tools → Subsystem health**, expand a category to see signal status, value and elapsed time since its last observation. A dash means the GS has no timestamp for that signal. The Simulation workspace shows the selected and waiting FOD IDs in the order reported by the Jetson mission FSM. The supervisor sends queue changes with the existing simulation preview and repeats the snapshot every six seconds. An older peer can still report position and queue length. The table reads “Awaiting a queue report” until it receives the IDs.
+
+When simulation telemetry pauses or a job ends, the map and flowchart retain the last observed pose and state in gray. These are historical observations. Connecting to a new radio session or receiving a new job ID clears the previous run. **Stop mission** is available for an accepted field session in standby, working, returning, or paused. The GS permits another request after three seconds without confirmation. Simulation has its own **Stop simulation** control.
+
+Open **Tools → Run Tests…** for individual commissioning checks or a read-only batch. Expand any result to see what was measured. [Commissioning checks](docs/COMMISSIONING.md)

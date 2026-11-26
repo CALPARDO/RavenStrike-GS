@@ -49,6 +49,11 @@ try:
     wait(w.stop_app.isEnabled)
     wait(lambda: w.sim_view.seed == 952741458 and w.sim_view.stamp > 0, 45)
     assert w.sim_view.plot.targets and w.sim_view.plot.barriers and w.runway.robot is None
+    wait(lambda: w.sim_view.queue and any(selected for _, selected in w.sim_view.queue), 45)
+    assert w.sim_tasks.rowCount() == len(w.sim_view.queue)
+    assert w.sim_tasks.item(0, 0).toolTip() == w.sim_view.queue[0][0]
+    assert "Live" in w.sim_view.phase.text()
+    print("PASS actual FSM queue, selected FOD and live state over serial", flush=True)
     wait(lambda: any(x*x + y*y > 9 for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 120)
     w.pause_app.click()
     wait(lambda: w.app_snapshot.state == "paused", 45)
@@ -66,6 +71,7 @@ try:
         raise AssertionError("Could not save the simulation workspace capture")
     wait(lambda: w.app_snapshot.state in ("finished", "failed"), 600)
     assert w.app_snapshot.state == "finished", w.app_snapshot.detail
+    assert w.sim_view.plot.historical and w.sim_view.plot.show_robot and "Last known" in w.sim_view.phase.text()
     print("PASS seeded Nav2 mission completed", w.app_snapshot.detail, flush=True)
     w.launch_app.click()
     wait(w.stop_app.isEnabled)

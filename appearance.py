@@ -104,6 +104,8 @@ def field_theme(app):
         QTabBar::tab { padding: 8px 13px; color: #486169; border-bottom: 3px solid transparent; }
         QTabBar::tab:selected { color: #075e55; border-bottom-color: #0b7167; font-weight: 650; }
         QTableWidget { background: white; alternate-background-color: #f6f9f9; border: 0; }
+        QToolButton#subsystemGroup { border: 0; background: transparent; color: #23454e; font-weight: 600; }
+        QToolButton#subsystemGroup:hover, QToolButton#subsystemGroup:focus { background: #e4efec; }
         QHeaderView::section { background: #f1f5f6; padding: 6px; color: #495f65; border: 0; font-weight: 600; }
     """)
     app.setWindowIcon(QIcon(str(ASSETS / "ravenstrike.svg")))

@@ -177,15 +177,16 @@ class FsmPanel(QWidget):
         self.chart.manual_zoom = False
         self.chart.frame_chart()
 
-    def display_simulation(self, code, stamp_ms):
-        sample = ("simulation", code, stamp_ms)
+    def display_simulation(self, code, stamp_ms, live=True):
+        sample = ("simulation", code, stamp_ms, live)
         if self.sample == sample:
             return
         self.sample = sample
         phase, name = self.states.get(code, ("Awaiting current sample", None))
-        self.current.setText(f"Simulation · {phase}")
+        qualifier = "Simulation" if live or not stamp_ms else "Simulation · last known"
+        self.current.setText(f"{qualifier} · {phase}")
         self.detail.setText(f"{name}  ·  {eastern(stamp_ms / 1000)} ET" if name else "")
-        self.chart.highlight(name)
+        self.chart.highlight(name, inferred=bool(name and not live))
 
     def display(self, snap, connected, idle=False):
         code = snap.fsm_state if snap else 0

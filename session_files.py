@@ -102,7 +102,11 @@ class JournalReplay(QDialog):
                             timeline["fixes"].append((ms, sample[2]/100, sample[3]/100, sample[4]))
                         else:
                             timeline["scene"] = (ms, row["detail"])
-                    if self.modes[-1] and (event == "disconnect" or (event == "workspace" and row["detail"] == "Field")):
+                    if event == "app_status" and row.get("state") in ("finished", "failed", "stopped"):
+                        timeline = self.simulations.get(row.get("job_id"))
+                        if timeline is not None:
+                            timeline["ended"] = ms
+                    if self.modes[-1] and event == "workspace" and row["detail"] == "Field":
                         self.mode_times.append(ms)
                         self.modes.append("")
                     if event == "location":
@@ -187,6 +191,14 @@ class JournalReplay(QDialog):
                     if event == "sim_preview":
                         phase = self.states.get(sample[1], (f"State {sample[1]}", ""))[0]
                         detail = f"{phase} · ({sample[2]/100:.2f}, {sample[3]/100:.2f}) m · {sample[4]}° · {sample[5]} queued"
+                        _, separator, metadata = row["detail"].partition("|q1:")
+                        if separator:
+                            queue = self.sim.parse_queue(metadata, sample[5])
+                            if queue is None:
+                                detail += " · queue IDs unavailable"
+                            elif queue:
+                                detail += " · " + ", ".join(
+                                    names(name) + (" (active)" if selected else "") for name, selected in queue)
                     elif event == "sim_layout":
                         detail = "Received the seeded map and assigned targets"
                     elif event == "app_status":
@@ -324,12 +336,15 @@ class JournalReplay(QDialog):
             plot.trace["fixes"] = timeline["fixes"][max(0, i-2048):i]
             plot.trace["target_time"] = math.inf
             plot.elapsed = ms
-            plot.show_robot = bool(i and ms - timeline["times"][i-1] <= 3000)
+            plot.show_robot = bool(i)
+            plot.historical = bool(i and (ms - timeline["times"][i-1] > 3000 or
+                                          ms >= timeline.get("ended", math.inf)))
             self.sim.detail.setText("Recorded simulation · local metres")
             if i:
                 row = timeline["rows"][i-1]
                 phase = self.states.get(row[1], (f"State {row[1]}", ""))[0]
-                self.sim.detail.setText(f"{phase} · {row[5]} queued · local metres")
+                sample_state = "Last known" if plot.historical else "Recorded"
+                self.sim.detail.setText(f"{sample_state} · {phase} · {row[5]} queued · local metres")
                 if len(row) == 8:
                     plot.trace["target"] = (row[6]/100, row[7]/100)
                     plot.trace["target_time"] = timeline["times"][i-1]

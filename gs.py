@@ -62,9 +62,10 @@ from PySide6.QtWidgets import (
 from serial.tools import list_ports
 
 from appearance import field_theme, icon
+from commissioning import CommissioningDialog
 from demo_replay import DemoReplay, SimulationView
 from demo_site import SITE, SITE_ZOOM, demo_obstacles
-from display import eastern
+from display import TargetNames, eastern
 from fsm_panel import FsmPanel
 from health_panel import PROBES, HealthPanel
 from location import LocationTrack
@@ -182,6 +183,7 @@ class Window(QMainWindow):
         field_theme(QApplication.instance())
         self.build = build_id()
         self.codec = Codec()
+        self.tests_dialog = None
         self.app_snapshot = None
         self.app_stamp = self.app_received = self.pending_until = 0
         self.track = LocationTrack()
@@ -357,6 +359,9 @@ class Window(QMainWindow):
         drawer.setWindowTitle("Subsystem health")
         drawer.resize(760, 470)
         details = QVBoxLayout(drawer)
+        details.setContentsMargins(16, 14, 16, 12)
+        details.setSpacing(10)
+        details.addWidget(label("Subsystem health", "heading"))
         self.health_panel = HealthPanel(self.codec.types["FieldStatus"])
         details.addWidget(self.health_panel)
         self.health_action.toggled.connect(drawer.setVisible)
@@ -370,7 +375,7 @@ class Window(QMainWindow):
         pane = column
         bar = QHBoxLayout()
         pane.addLayout(bar)
-        self.map_heading = label("Demo site", "heading")
+        self.map_heading = label("Map", "heading")
         bar.addWidget(self.map_heading)
         bar.addStretch()
         self.runway = RunwayMap()
@@ -462,6 +467,25 @@ class Window(QMainWindow):
         self.scan_state = label("Scanning closed", "closed")
         row.addWidget(self.scan_state)
 
+    @staticmethod
+    def target_table(name):
+        table = QTableWidget(0, 2)
+        table.setAccessibleName(name)
+        table.setHorizontalHeaderLabels(["FOD ID", "UGV status"])
+        table.verticalHeader().hide()
+        table.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.Shape.NoFrame)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setDefaultSectionSize(30)
+        table.setMinimumHeight(65)
+        return table
+
     def activity_panel(self, column):
         pane = column
         pane.setContentsMargins(14, 12, 14, 12)
@@ -470,22 +494,8 @@ class Window(QMainWindow):
         self.mission_panel(pane)
         self.queue_caption = label("Target register", "section")
         pane.addWidget(self.queue_caption)
-        self.tasks = QTableWidget(0, 2)
-        self.tasks.setAccessibleName("Mission targets")
-        self.tasks.setHorizontalHeaderLabels(["FOD ID", "UGV status"])
-        self.tasks.verticalHeader().hide()
-        self.tasks.horizontalHeader().setDefaultAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.tasks.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tasks.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tasks.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tasks.setShowGrid(False)
-        self.tasks.setFrameShape(QFrame.Shape.NoFrame)
-        self.tasks.setAlternatingRowColors(True)
+        self.tasks = self.target_table("Mission targets")
         self.tasks.itemActivated.connect(self.locate_row)
-        self.tasks.verticalHeader().setDefaultSectionSize(30)
-        self.tasks.setMinimumHeight(65)
         pane.addWidget(self.tasks, 1)
         self.empty_targets = label("No targets in this session", "muted")
         self.empty_targets.setWordWrap(True)
@@ -624,6 +634,13 @@ class Window(QMainWindow):
                 stats.addRow(label(caption, "field"), value)
             self.sim_values.append(value)
         layout.addLayout(stats)
+        layout.addWidget(label("FOD queue", "section"))
+        self.sim_tasks = self.target_table("Simulated mission targets")
+        layout.addWidget(self.sim_tasks)
+        self.sim_queue_info = label("Awaiting a queue report", "muted")
+        layout.addWidget(self.sim_queue_info)
+        self.sim_queue_key = None
+        self.sim_names = TargetNames()
         layout.addStretch()
 
     def menus(self):
@@ -671,6 +688,7 @@ class Window(QMainWindow):
         tools = self.menuBar().addMenu("&Tools")
         action(tools, "Radio connection…", self.radio_dialog.show)
         tools.addAction(self.health_action)
+        action(tools, "Run Tests…", self.open_tests)
         action(tools, "Preferences…", self.preferences).setMenuRole(
             QAction.MenuRole.PreferencesRole
         )
@@ -686,6 +704,13 @@ class Window(QMainWindow):
                 f"Field ground station\nBuild {self.build} · Wire v{WIRE_MAP_VERSION}",
             ),
         ).setMenuRole(QAction.MenuRole.AboutRole)
+
+    def open_tests(self):
+        if self.tests_dialog is None:
+            self.tests_dialog = CommissioningDialog(self)
+        self.tests_dialog.show()
+        self.tests_dialog.raise_()
+        self.tests_dialog.activateWindow()
 
     def show_guide(self):
         QMessageBox.information(
@@ -789,7 +814,8 @@ class Window(QMainWindow):
         self.tick()
 
     def platform_estop(self):
-        if not self.simulation and self.radio and self.radio.ready and self.app_fresh() and self.health_panel.can_trigger():
+        if (not self.simulation and self.radio and self.radio.ready and self.app_fresh()
+                and self.app_snapshot.state not in SIM_ACTIVE and self.health_panel.can_trigger()):
             msg = self.codec.types["AppCommand"](self.codec.stamp(), uuid4().hex, "trigger", "lynx-estop", "", False)
             self.station.send(21, msg, "Trigger Lynx base E-stop")
             self.event_line("Lynx E-stop requested · awaiting hardware input")
@@ -916,27 +942,60 @@ class Window(QMainWindow):
             self.app_snapshot is None
             or (snap is not None and snap.state == "idle" and not snap.mission_adapter_online)
         )
-        fresh_sim = False
         view = self.sim_view
-        if view.job:
-            running_sim = bool(snap and snap.job_id == view.job and snap.state in SIM_ACTIVE[:-1])
-            fresh_sim = running_sim and 0 <= time.time_ns()//1_000_000 - view.stamp < 3000
-            phase = self.fsm_panel.states.get(view.code, ("Unknown phase", ""))[0]
-            view.detail.setText(
-                "Live track · local metres" if fresh_sim else
-                "Waiting for a current simulation sample" if running_sim else "Last received simulation track"
-            )
-            if view.plot.show_robot != fresh_sim:
-                view.plot.show_robot = fresh_sim
-                view.plot.update()
+        running_sim = bool(snap and snap.job_id == view.job and snap.state in SIM_ACTIVE[:-1])
+        now_ms = time.time_ns() // 1_000_000
+        fresh_sim = running_sim and 0 <= now_ms - view.stamp < 3000
+        phase, state_name = self.fsm_panel.states.get(view.code, ("Unknown phase", "Unknown state"))
+        if view.stamp:
+            phase_label = state_name.replace("_", " ").capitalize()
+            if fresh_sim:
+                tag = {"paused": "Paused", "pausing": "Pausing", "resuming": "Resuming"}.get(snap.state, "Live")
+                view.phase.setText(f"{tag} · {phase_label}")
+                view.detail.setText("Live track · local metres")
+            else:
+                view.phase.setText(f"Last known · {phase_label}")
+                if not snap:
+                    reason = "Telemetry unavailable"
+                elif running_sim:
+                    reason = "Telemetry stale"
+                else:
+                    reason = f"Simulation {snap.state}"
+                view.detail.setText(f"{reason} · last sample {eastern(view.stamp / 1000)} ET")
+        else:
+            view.phase.setText("Waiting for first FSM sample" if running_sim else "No simulation state received")
+            view.detail.setText("Local coordinates in metres")
+        historical = not fresh_sim
+        if view.plot.historical != historical or view.plot.show_robot != bool(view.stamp):
+            view.plot.historical = historical
+            view.plot.show_robot = bool(view.stamp)
+            view.plot.update()
         for widget, value in zip(self.sim_values, (
             str(view.seed) if view.seed is not None else "—",
-            str(view.queued) if fresh_sim else "—",
-            f"{view.plot.trace['fixes'][-1][3]}°" if fresh_sim else "—",
+            str(view.queued) if view.stamp else "—",
+            f"{view.plot.trace['fixes'][-1][3]}°" if view.stamp else "—",
         )):
             widget.setText(value)
+        queue_key = (view.job, view.queue)
+        if self.sim_queue_key != queue_key:
+            if self.sim_queue_key is None or self.sim_queue_key[0] != view.job:
+                self.sim_names = TargetNames()
+            self.sim_queue_key = queue_key
+            self.sim_tasks.setRowCount(len(view.queue or ()))
+            for i, (name, selected) in enumerate(view.queue or ()):
+                item = QTableWidgetItem(self.sim_names(name))
+                item.setToolTip(name)
+                self.sim_tasks.setItem(i, 0, item)
+                self.sim_tasks.setItem(i, 1, QTableWidgetItem("Active" if selected else "Queued"))
+            self.sim_tasks.setVisible(bool(view.queue))
+        queue_current = fresh_sim and now_ms - view.queue_stamp < 9000
+        queue_text = ("Awaiting a queue report" if view.queue is None else
+                      "No targets queued" if not view.queue else "Controller queue")
+        if view.queue is not None and not queue_current:
+            queue_text += " · last known"
+        self.sim_queue_info.setText(queue_text)
         if self.simulation:
-            self.fsm_panel.display_simulation(view.code if fresh_sim else 0, view.stamp)
+            self.fsm_panel.display_simulation(view.code, view.stamp, fresh_sim)
         else:
             self.fsm_panel.display(snap, ready, idle)
         pose = self.track.current() if ready else None
@@ -1170,6 +1229,7 @@ class Window(QMainWindow):
         self.app_stamp = self.app_received = self.pending_until = 0
         self.leave_job = None
         self.health_panel.reset_observations()
+        self.sim_view.reset()
         self.track = LocationTrack()
         self.runway.last_known = None
         self.invalidate_draft()
@@ -1180,6 +1240,8 @@ class Window(QMainWindow):
         self.tick()
 
     def disconnect(self):
+        if self.tests_dialog and self.tests_dialog.timer.isActive():
+            self.tests_dialog.cancel()
         if self.radio:
             self.radio.close()
             self.drain()
@@ -1190,7 +1252,6 @@ class Window(QMainWindow):
         self.track = LocationTrack()
         self.app_snapshot = None
         self.pending_until = 0
-        self.sim_view.reset()
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1355,6 +1416,9 @@ class Window(QMainWindow):
                             and stamp > self.app_stamp
                             and -0.2 <= (time.time_ns() - stamp) / 1e9 < 3
                         ):
+                            msg.detail, separator, reply = msg.detail.partition("|d1:")
+                            if separator and self.tests_dialog:
+                                self.tests_dialog.reply(reply)
                             base, separator, metadata = msg.detail.partition("|h1:")
                             if separator:
                                 msg.detail = base
@@ -1412,7 +1476,7 @@ class Window(QMainWindow):
                                 }.get(self.pending_op, ()))
                             ):
                                 self.pending_until = 0
-                            if self.sim_view.job != msg.job_id:
+                            if msg.job_id and self.sim_view.job != msg.job_id:
                                 self.sim_view.reset()
                                 self.sim_view.job = msg.job_id
                             if msg.state in SIM_ACTIVE[:-1] and msg.job_id:
@@ -1495,7 +1559,6 @@ class Window(QMainWindow):
                 pass
         self.radio = self.journal = self.station = None
         self.track = LocationTrack()
-        self.sim_view.reset()
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1542,7 +1605,6 @@ class Window(QMainWindow):
             self.runway.obstacles = points
             self.runway.update()
         self.obstacle_key.setVisible(bool(points))
-        self.map_heading.setText("Demo site" if self.runway.center == SITE else "Route map")
         self.sim_button.setEnabled(not self.field_busy())
         self.sim_button.setToolTip("Finish the field session first" if self.field_busy() else "Seeded Nav2 missions")
         self.telemetry_strip.setVisible(self.radio is not None and not self.simulation)
@@ -1645,14 +1707,21 @@ class Window(QMainWindow):
         self.scan.setVisible(bool(st and st.operating and not closed))
         self.add_target.setVisible(bool(st and st.operating and not closed))
         self.stops.setVisible(self.radio is not None and not self.simulation)
-        self.stops.setEnabled(bool(ready and not self.simulation and
-                              (st.can_halt or (self.app_fresh() and self.health_panel.can_trigger()))))
+        can_stop = bool(ready and not self.simulation and st.can_halt)
+        can_estop = bool(ready and not self.simulation and snap and snap.state not in SIM_ACTIVE
+                         and self.health_panel.can_trigger())
+        self.stops.setEnabled(can_stop or can_estop)
+        self.stops.setText("Stop controls" if can_estop and not can_stop else "Stop mission")
+        self.stops.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup if can_estop and not can_stop
+                                else QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.stops.setToolTip("Stop autonomous navigation and cleaning in this session" if can_stop else
+                              "Open available stop controls" if can_estop else
+                              "Requires a ready radio link and an accepted field mission")
         recording = bool(self.journal and self.journal.recording)
         self.record_button.setVisible(recording or bool(ready and not self.simulation and self.app_fresh()
                                      and self.app_snapshot.fsm_state == self.app_snapshot.FSM_BRING_UP_SYSTEM))
         self.record_button.setText("Stop recording" if recording else "Record")
-        self.trigger_estop.setEnabled(bool(ready and not self.simulation and self.app_fresh() and self.health_panel.can_trigger()
-                                          and self.app_snapshot.state not in SIM_ACTIVE))
+        self.trigger_estop.setEnabled(can_estop)
         self.field_pause.setVisible(bool(not self.simulation and st and st.session and (st.operating or st.state == "paused")))
         self.field_pause.setEnabled(bool(ready and st and self.health_panel.can_pause() and (st.operating or st.state == "paused")))
         self.field_pause.setText("Continue mission" if st and st.state == "paused" else "Pause mission")

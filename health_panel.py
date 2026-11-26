@@ -1,5 +1,6 @@
 """Operator indications. All onboard states come from one latest-only status frame."""
 
+from itertools import groupby
 import time
 
 from PySide6.QtCore import Qt
@@ -9,9 +10,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
 )
-
-from display import eastern
 
 # Text describes the evidence each green indication actually represents.
 PROBES = (
@@ -43,8 +43,8 @@ class HealthPanel(QTableWidget):
         super().__init__()
         self.status_type = status_type
         self.rows = {}
-        self.setColumnCount(5)
-        self.setHorizontalHeaderLabels(["System", "Signal", "Status", "Last observed (ET)", "Value"])
+        self.setColumnCount(4)
+        self.setHorizontalHeaderLabels(["Subsystem / signal", "Status", "Last observed", "Value"])
         self.observed = {}
         self.values = {}
         self.field_controls = False
@@ -56,9 +56,9 @@ class HealthPanel(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(27)
         self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.setAlternatingRowColors(True)
         self.setShowGrid(False)
         names = [
@@ -73,20 +73,47 @@ class HealthPanel(QTableWidget):
                   "Mission FSM":"FSM", "Nav2":"Controller", "Odometry":"Lynx", "Spatial scan":"LiDAR",
                   "GNSS":"Lynx", "Perception":"Perception", "Command guard":"Controller",
                   "Cleaning":"Collector", "Camera":"Perception"}
-        names.sort(key=lambda row: (groups[row[0]], row[0]))
-        self.setRowCount(len(names))
-        for index, (name, tip) in enumerate(names):
-            title = QTableWidgetItem(name)
-            status = QTableWidgetItem()
-            title.setToolTip(tip)
-            status.setToolTip(tip)
-            self.setItem(index, 0, QTableWidgetItem(groups[name]))
-            self.setItem(index, 1, title)
-            self.setItem(index, 2, status)
-            self.setItem(index, 3, QTableWidgetItem("—"))
-            self.setItem(index, 4, QTableWidgetItem("—"))
-            self.rows[name] = status
-            self.indicate(name, 0, "Unknown")
+        order = ("Radio", "Controller", "Lynx", "LiDAR", "Perception", "Collector", "FSM")
+        names.sort(key=lambda row: (order.index(groups[row[0]]), row[0]))
+        self.categories = {}
+        for group, members in groupby(names, key=lambda row: groups[row[0]]):
+            index = self.rowCount()
+            self.insertRow(index)
+            toggle = QToolButton()
+            toggle.setText(group)
+            toggle.setAutoRaise(True)
+            toggle.setObjectName("subsystemGroup")
+            toggle.setCheckable(True)
+            toggle.setArrowType(Qt.ArrowType.RightArrow)
+            toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            toggle.setAccessibleName(f"{group} subsystem signals")
+            self.setCellWidget(index, 0, toggle)
+            summary = QTableWidgetItem()
+            self.setItem(index, 1, summary)
+            children = []
+            for name, tip in members:
+                row = self.rowCount()
+                self.insertRow(row)
+                title = QTableWidgetItem("   " + name)
+                title.setToolTip(tip)
+                self.setItem(row, 0, title)
+                status = QTableWidgetItem()
+                status.setToolTip(tip)
+                self.setItem(row, 1, status)
+                self.setItem(row, 2, QTableWidgetItem("—"))
+                self.setItem(row, 3, QTableWidgetItem("—"))
+                self.rows[name] = status
+                self.indicate(name, 0, "Unknown")
+                children.append(status)
+                self.setRowHidden(row, True)
+            self.categories[group] = (toggle, summary, children)
+            toggle.toggled.connect(lambda opened, key=group: self.expand_group(key, opened))
+
+    def expand_group(self, group, opened):
+        toggle, _, children = self.categories[group]
+        toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        for cell in children:
+            self.setRowHidden(cell.row(), not opened)
 
     def indicate(self, name, level, state):
         cell = self.rows[name]
@@ -139,8 +166,8 @@ class HealthPanel(QTableWidget):
 
     def summary(self):
         levels = {name: row.data(Qt.ItemDataRole.UserRole) for name, row in self.rows.items()}
-        faults = [name for name, level in levels.items() if level == 3]
-        warnings = [name for name, level in levels.items() if level == 2]
+        faults = sorted(name for name, level in levels.items() if level == 3)
+        warnings = sorted(name for name, level in levels.items() if level == 2)
         if faults or warnings:
             return "Check " + ", ".join(faults + warnings)
         count = sum(level == 1 for level in levels.values())
@@ -182,12 +209,16 @@ class HealthPanel(QTableWidget):
                       "Calibration stream" if camera_ok else "Stale" if snap and camera_time else "No report")
         self.values["Battery"] = f"{battery}%" if known else "—"
         self.values["E-stop"] = {0:"Released", 1:"Active"}.get(stop, "—")
+        now = time.time()
         for name, cell in self.rows.items():
             observed = self.observed.get(name)
             value = self.values.get(name, "—") if snap else "—"
             if name in ("Spatial scan", "Odometry") and time.monotonic() - self.diag_received >= 8:
                 value = "—"
-            for col, text in ((3, eastern(observed) if observed else "—"), (4, value)):
+            age = max(0, int(now - observed)) if observed is not None else None
+            last_seen = ("—" if age is None else "Just now" if age == 0 else
+                         "1 second ago" if age == 1 else f"{age} seconds ago")
+            for col, text in ((2, last_seen), (3, value)):
                 item = self.item(cell.row(), col)
                 if item.text() != text:
                     item.setText(text)
@@ -196,3 +227,16 @@ class HealthPanel(QTableWidget):
             state = (snap.health >> getattr(self.status_type, key)) & 3 if snap else 0
             warning = "Not ready" if key == "NAV2" else "Degraded"
             self.indicate(name, state, (("No report" if snap else "Unknown"), good, warning, fault)[state])
+        for _, summary, children in self.categories.values():
+            levels = [cell.data(Qt.ItemDataRole.UserRole) for cell in children]
+            if 3 in levels:
+                level, text = 3, "Fault"
+            elif 2 in levels:
+                level, text = 2, "Check signals"
+            elif all(level == 1 for level in levels):
+                level, text = 1, "Reporting"
+            else:
+                level, text = 0, f"{levels.count(1)} of {len(children)} reporting"
+            if summary.text() != text:
+                summary.setText(text)
+                summary.setForeground(QColor(COLORS[level][1]))

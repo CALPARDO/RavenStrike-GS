@@ -409,7 +409,7 @@ def test_offline_replay_and_controls(window, monkeypatch):
     assert checked and window.radio is None and window.station is None
 
 
-def test_health_colors_and_stale_reset(window):
+def test_health_colors_and_stale_reset(window, monkeypatch):
     panel = window.health_panel
     assert not panel.isVisible() and window.health_summary.text() == "Awaiting system status"
     tools = next(a.menu() for a in window.menuBar().actions() if a.text() == "&Tools")
@@ -442,8 +442,23 @@ def test_health_colors_and_stale_reset(window):
         0,
         (1 << kind.NAV2) | (2 << kind.ODOMETRY) | (3 << kind.GNSS),
     )
-    assert panel.rowCount() == 13 and panel.columnCount() == 5
-    assert panel.item(panel.rows["Camera"].row(), 0).text() == "Perception"
+    assert len(panel.rows) == 13 and panel.columnCount() == 4
+    camera = panel.rows["Camera"].row()
+    assert panel.isRowHidden(camera)
+    group = panel.categories["Perception"][0]
+    group.click()
+    assert not panel.isRowHidden(camera)
+    now = time.time()
+    panel.observed["Camera"] = now - 5
+    monkeypatch.setattr(time, "time", lambda: now)
+    panel.display("Radio ready", msg)
+    assert panel.item(camera, 2).text() == "5 seconds ago"
+    monkeypatch.setattr(time, "time", lambda: now + 4)
+    panel.display("Radio ready", msg)
+    assert panel.item(camera, 2).text() == "9 seconds ago"
+    group.click()
+    assert panel.isRowHidden(camera)
+    panel.observed.pop("Camera")
     panel.display("Radio ready", msg)
     assert panel.rows["Radio"].text() == "Ready"
     assert [panel.rows[n].data(Qt.ItemDataRole.UserRole) for n in ("Nav2", "Odometry", "GNSS", "Cleaning")] == [
@@ -919,6 +934,7 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     row = [ms, status.FSM_NAVIGATION_MODE, 150, -50, 45, 2, 300, -75]
     msg = status(stamp, "a"*32, "nav2-demo", "running", "sim1:"+json.dumps(row),
                  -1, -1, False, status.FSM_BRING_UP_SYSTEM, 0)
+    msg.detail += '|q1:[1,["fod-1","fod-2"]]'
     w.radio.receive(24, w.codec.encode(msg))
     w.tick()
     view = w.sim_view
@@ -929,6 +945,9 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     assert view.plot.trace["fixes"][-1][1:] == (1.5, -.5, 45)
     assert w.runway.robot is None and not w.runway.tracks.fixes
     assert w.fsm_panel.chart.active == "NAVIGATION_MODE"
+    assert view.phase.text() == "Live · Navigation mode"
+    assert w.sim_tasks.item(1, 0).text() == "fod-2" and w.sim_tasks.item(1, 1).text() == "Active"
+    assert "Controller queue" in w.sim_queue_info.text()
     monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.No)
     w.field_button.click()
     assert w.sim_button.isChecked() and w.simulation
@@ -945,9 +964,15 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     assert not view.accept(msg, (ms+2)*1_000_000)
     w.app_received -= 4
     w.tick()
-    assert not view.plot.show_robot and w.fsm_panel.chart.active is None
+    assert view.plot.show_robot and view.plot.historical and w.fsm_panel.chart.active is None
     w.disconnect()
-    assert w.map_page.currentWidget() is w.field_map and not view.plot.trace["fixes"]
+    w.set_workspace(True)
+    assert w.fsm_panel.chart.active == "NAVIGATION_MODE" and w.fsm_panel.chart.inferred
+    assert "Last known" in view.phase.text() and "last known" in w.sim_queue_info.text()
+    assert w.sim_tasks.rowCount() == 2
+    w.connect_radio()
+    assert not view.plot.trace["fixes"] and w.sim_tasks.rowCount() == 0
+    assert not w.fsm_panel.chart.active and w.sim_queue_info.text() == "Awaiting a queue report"
 
 
 
@@ -975,6 +1000,54 @@ def test_workspace_switch_preserves_navigation_and_field_authority(window, monke
     w.set_workspace(True)
     assert not w.simulation and w.map_page.currentWidget() is w.field_map
     assert not sent and w.radio.ready
+
+
+def test_running_job_with_stale_pose_never_shows_it_as_live(window, monkeypatch):
+    w = window
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    w.port.setCurrentText("fixture")
+    w.connect_radio()
+    w.radio.ready = True
+    w.set_workspace(True)
+    status = w.codec.types["FieldStatus"]
+    stamp = w.codec.stamp()
+    ms = stamp.sec * 1000 + stamp.nanosec // 1_000_000
+    msg = status(stamp, "b"*32, "nav2-demo", "running",
+                 f'sim1:[{ms-2250},7,125,-50,85,1]|q1:[0,["fod-2"]]',
+                 -1, -1, False, 0, 0)
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    assert w.sim_view.phase.text() == "Live · Navigation mode"
+    monkeypatch.setattr(time, "time_ns", lambda: (ms + 1000) * 1_000_000)
+    w.tick()
+    assert w.app_fresh() and w.sim_view.plot.historical
+    assert "Telemetry stale" in w.sim_view.detail.text()
+    assert w.fsm_panel.chart.active == "NAVIGATION_MODE" and w.fsm_panel.chart.inferred
+    msg.stamp = w.codec.stamp()
+    msg.state = "paused"
+    msg.detail = f'sim1:[{ms+1000},7,125,-50,85,0]|q1:[-1,[]]'
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    assert w.sim_view.phase.text() == "Paused · Navigation mode" and not w.sim_view.plot.historical
+    assert w.sim_tasks.rowCount() == 0 and w.sim_queue_info.text() == "No targets queued"
+    msg.job_id, msg.state, msg.detail = "a"*32, "running", ""
+    msg.stamp.nanosec += 1
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    assert not w.sim_view.plot.trace["fixes"] and w.fsm_panel.chart.active is None
+    assert w.sim_view.phase.text() == "Waiting for first FSM sample"
+    assert w.sim_queue_info.text() == "Awaiting a queue report"
+
+
+def test_sim_queue_uses_order_and_selection_from_the_same_sample(window):
+    view = window.sim_view
+    ident = "onboard-" + "a" * 32
+    assert view.parse_queue(json.dumps([1, [ident, "fod-4"]]), 2) == ((ident, False), ("fod-4", True))
+    assert view.parse_queue("[-1,[]]", 0) == ()
+    for invalid in ('[2,["a","b"]]', '[true,["a","b"]]', '[0,["a","a"]]',
+                    '[-1,["a","bad|id"]]', '[0,["a"]]'):
+        assert view.parse_queue(invalid, 2) is None
 
 
 def test_simulation_layout_is_bounded_and_reset_per_job(window):
@@ -1053,7 +1126,8 @@ def test_field_recording_stop_health_and_playback(window, monkeypatch):
     assert not w.log.toPlainText()
     w.source_filters["UGV"].setChecked(True)
     assert "Collector reporting" in w.log.toPlainText() and "Command queued" not in w.log.toPlainText()
-    w.journal.log("sim_preview", "sim1:[1234,7,20,30,90,1]", job_id="job")
+    w.journal.log("sim_preview", 'sim1:[1234,7,20,30,90,1]|q1:[0,["fod-5"]]', job_id="job")
+    w.journal.log("app_status", "Simulation finished", job_id="job", state="finished")
     w.record_button.click()
     path = w.journal.record_path
     with gzip.open(path, "rt") as clip:
@@ -1066,6 +1140,9 @@ def test_field_recording_stop_health_and_playback(window, monkeypatch):
     assert [playback.speed.itemData(i) for i in range(5)] == [.5, 1, 2, 5, 20]
     playback.seek(5)
     assert playback.views.currentWidget() is playback.sim and playback.sim.plot.trace["fixes"][-1][1:] == (.2,.3,90)
+    assert playback.sim.plot.show_robot and playback.sim.plot.historical
+    assert "Last known" in playback.sim.detail.text()
+    assert any("fod-5 (active)" in line for line in playback.events)
     assert "Record stop" in playback.current_event.text()
     playback.seek(-5)
     assert playback.slider.value() == 0

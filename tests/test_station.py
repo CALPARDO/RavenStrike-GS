@@ -96,6 +96,28 @@ def test_queue_controls(station):
     assert st.state == "completed" and st.review_token() is None
 
 
+@pytest.mark.parametrize("state", [
+    "awaiting acceptance", "standby", "working", "paused", "returning", "halted",
+    "completed", "canceled", "rejected",
+])
+def test_stop_gate_and_retry(station, state, monkeypatch):
+    st = station
+    st.state = state
+    if state not in ("standby", "working", "paused", "returning"):
+        assert not st.can_halt
+        with pytest.raises(ValueError):
+            st.command("stop")
+        return
+    assert st.can_halt
+    st.command("stop")
+    sent = st.cancel_requested_at
+    assert sent is not None and not st.can_halt
+    monkeypatch.setattr(time, "monotonic", lambda: sent + 3.01)
+    assert st.can_halt
+    st.session = ""
+    assert not st.can_halt
+
+
 def test_outcome_can_arrive_before_radio_ack(station):
     st = station
     status(st, "", "accepted", state="standby")

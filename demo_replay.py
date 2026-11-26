@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
@@ -29,6 +30,7 @@ class GroundTrack(QWidget):
         self.targets = []
         self.obstacles = OBSTACLES_XY
         self.show_robot = True
+        self.historical = False
         self.setMinimumSize(360, 200)
         points = [row[1:3] for row in trace["fixes"]] + [trace["target"], *OBSTACLES_XY]
         self.bounds = [
@@ -91,15 +93,15 @@ class GroundTrack(QWidget):
         p.drawText(origin + QPointF(-10, 23), "Base")
         if self.elapsed >= self.trace["target_time"]:
             target = project(*self.trace["target"])
-            p.setPen(QPen(QColor("#ad4c19"), 2))
-            p.setBrush(QColor("#ffddbb"))
+            p.setPen(QPen(QColor("#667982" if self.historical else "#ad4c19"), 2))
+            p.setBrush(QColor("#e3e9eb" if self.historical else "#ffddbb"))
             p.drawEllipse(target, 6, 6)
-            p.drawText(target + QPointF(9, -8), "FOD")
+            p.drawText(target + QPointF(9, -8), "Last FOD" if self.historical else "FOD")
         if fixes and self.show_robot:
             _, x, y, heading = fixes[-1]
             p.translate(project(x, y))
             p.setPen(QPen(QColor("white"), 2))
-            p.setBrush(QColor("#194f61"))
+            p.setBrush(QColor("#667982" if self.historical else "#194f61"))
             if heading is None:
                 p.drawEllipse(QPointF(), 7, 7)
             else:
@@ -212,7 +214,8 @@ class SimulationView(QWidget):
         self.plot.targets = []
         self.phase.setText("Simulation map")
         self.detail.setText("Local coordinates in metres")
-        self.stamp = self.code = 0
+        self.stamp = self.code = self.queued = self.queue_stamp = 0
+        self.queue = None
         self.plot.trace["fixes"].clear()
         self.plot.trace["target_time"] = math.inf
         self.plot.bounds = [-8, 8, -8, 8]
@@ -244,6 +247,9 @@ class SimulationView(QWidget):
 
     @staticmethod
     def parse_sample(detail, stamp, previous=0):
+        if len(detail) > 325:
+            return None
+        detail = detail.partition("|q1:")[0]
         if not detail.startswith("sim1:") or len(detail) > 133:
             return None
         try:
@@ -264,6 +270,13 @@ class SimulationView(QWidget):
         if row is None:
             return False
         self.stamp, self.code, x, y, heading, self.queued, *target = row
+        _, separator, metadata = msg.detail.partition("|q1:")
+        if separator:
+            self.queue = self.parse_queue(metadata, self.queued)
+            self.queue_stamp = self.stamp if self.queue is not None else 0
+        elif self.queue is not None and len(self.queue) != self.queued:
+            self.queue = None
+            self.queue_stamp = 0
         x, y = x / 100, y / 100
         self.plot.elapsed = self.stamp
         track = self.plot.trace
@@ -280,3 +293,18 @@ class SimulationView(QWidget):
             self.plot.bounds = [min(w, x-.5), max(e, x+.5), min(s, y-.5), max(n, y+.5)]
         self.plot.update()
         return True
+
+    @staticmethod
+    def parse_queue(metadata, count):
+        if len(metadata) > 188:
+            return None
+        try:
+            selected, ids = json.loads(metadata)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        if (not isinstance(ids, list) or len(ids) != count or count > 8
+                or type(selected) is not int or not -1 <= selected < len(ids)
+                or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", name)
+                       for name in ids) or len(set(ids)) != count):
+            return None
+        return tuple((name, i == selected) for i, name in enumerate(ids))
