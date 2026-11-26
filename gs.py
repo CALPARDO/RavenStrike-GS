@@ -4,6 +4,7 @@ import faulthandler
 import json
 import math
 import queue
+import secrets
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -45,6 +47,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -56,7 +59,7 @@ from serial.tools import list_ports
 
 from appearance import field_theme, icon
 from demo_replay import DemoReplay, SimulationView
-from demo_site import OBSTACLES_XY, SITE, SITE_ZOOM, demo_obstacles
+from demo_site import SITE, SITE_ZOOM, demo_obstacles
 from display import eastern
 from fsm_panel import FsmPanel
 from health_panel import HealthPanel
@@ -178,7 +181,8 @@ class Window(QMainWindow):
         self.radio = self.station = self.journal = None
         self.log_folder = self.last_rx = self.presentation = self.shown = None
         self.queue_rows = self.link_state = self.last_event = None
-        self.setWindowTitle("RavenStrike | Field ground station")
+        self.simulation = False
+        self.setWindowTitle("RavenStrike | Mission control")
         root = QWidget()
         self.setCentralWidget(root)
         shell = QVBoxLayout(root)
@@ -192,7 +196,23 @@ class Window(QMainWindow):
         mark.setPixmap(self.windowIcon().pixmap(34, 34))
         bar.addWidget(mark)
         bar.addWidget(label("RavenStrike", "brand"))
-        bar.addWidget(label("Ground station", "headerText"))
+        switch = QWidget()
+        switch.setObjectName("workspaceSwitch")
+        controls = QHBoxLayout(switch)
+        controls.setContentsMargins(3, 3, 3, 3)
+        controls.setSpacing(2)
+        group = QButtonGroup(self)
+        self.field_button = QPushButton("Field")
+        self.sim_button = QPushButton("Simulation")
+        for button in (self.field_button, self.sim_button):
+            button.setObjectName("workspaceButton")
+            button.setCheckable(True)
+            group.addButton(button)
+            controls.addWidget(button)
+        self.field_button.setChecked(True)
+        self.field_button.clicked.connect(lambda: self.set_workspace(False))
+        self.sim_button.clicked.connect(lambda: self.set_workspace(True))
+        bar.addWidget(switch)
         bar.addStretch()
         self.identity = label("Field console", "headerText")
         bar.addWidget(self.identity)
@@ -237,14 +257,17 @@ class Window(QMainWindow):
         workspace.addWidget(self.splitter, 1)
         self.tabs = QTabWidget()
         self.splitter.addWidget(self.tabs)
-        self.map_page = QWidget()
+        self.map_page = QStackedWidget()
+        self.field_map = QWidget()
+        self.map_page.addWidget(self.field_map)
         self.tabs.addTab(self.map_page, icon("map"), "Mission map")
-        self.map_panel(QVBoxLayout(self.map_page))
+        self.map_panel(QVBoxLayout(self.field_map))
         inspector = QFrame()
         inspector.setObjectName("card")
         inspector.setMinimumWidth(310)
-        self.inspector_card = inspector
-        self.splitter.addWidget(inspector)
+        self.sidebar = QStackedWidget()
+        self.sidebar.addWidget(inspector)
+        self.splitter.addWidget(self.sidebar)
         self.activity_panel(QVBoxLayout(inspector))
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 1)
@@ -424,7 +447,7 @@ class Window(QMainWindow):
     def activity_panel(self, column):
         pane = column
         pane.setContentsMargins(14, 12, 14, 12)
-        self.inspector = label("Mission control", "heading")
+        self.inspector = label("Field mission", "heading")
         pane.addWidget(self.inspector)
         self.mission_panel(pane)
         self.queue_caption = label("Target register", "section")
@@ -446,9 +469,9 @@ class Window(QMainWindow):
         self.tasks.verticalHeader().setDefaultSectionSize(30)
         self.tasks.setMinimumHeight(65)
         pane.addWidget(self.tasks, 1)
-        self.empty_targets = label("Submitted and UGV-reported targets appear here.", "muted")
+        self.empty_targets = label("No targets in this session", "muted")
         self.empty_targets.setWordWrap(True)
-        self.empty_targets.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_targets.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         pane.addWidget(self.empty_targets, 1)
         self.selection_info = label("", "muted")
         self.selection_info.setWordWrap(True)
@@ -525,41 +548,47 @@ class Window(QMainWindow):
         self.log.setPlaceholderText("Radio and operator events appear here.")
         pane.addWidget(self.log)
 
-        self.sim_view = SimulationView()
-        self.sim_tab = self.tabs.addTab(self.sim_view, icon("map"), "Jetson simulation")
-        self.tabs.setTabVisible(self.sim_tab, False)
-
-        apps = self.apps_dialog = QDialog(self)
-        apps.setWindowTitle("Jetson simulations")
-        layout = QVBoxLayout(apps)
-        layout.addWidget(label("Simulation launcher", "heading"))
-        layout.addWidget(label("Isolated software jobs · field telemetry stays live.", "muted"))
-        self.catalog = json.loads((CONTRACT / "apps.json").read_text())
-        self.app_choice = QComboBox()
-        for key, spec in self.catalog.items():
-            self.app_choice.addItem(spec["label"], key)
-        self.scenario = QComboBox()
-        self.scenario.addItems(self.catalog["scenario"]["scenarios"])
-        self.scenario.setCurrentText(self.catalog["scenario"]["defaults"]["scenario"])
-        self.wait_timeout = QCheckBox("Exercise operator timeout")
-        self.wait_timeout.setChecked(self.catalog["scenario"]["defaults"]["wait_timeout"])
-        layout.addWidget(self.app_choice)
-        layout.addWidget(self.scenario)
-        layout.addWidget(self.wait_timeout)
-        actions = QHBoxLayout()
-        layout.addLayout(actions)
-        self.launch_app = self.button(actions, "Run simulation", lambda: self.app_command("start"))
-        self.stop_app = self.button(actions, "Stop simulation", lambda: self.app_command("stop"))
         self.stop_menu.addSection("Field robot")
         self.stop_menu.addAction(self.halt)
         self.stop_menu.addAction(self.abort)
         self.stop_menu.addAction(self.scan.action)
         self.stop_menu.addAction("Hardware E-stop · physical control only").setEnabled(False)
-        self.stop_menu.addSection("Jetson simulation")
-        self.stop_menu.addAction(self.stop_app.action)
+        self.simulation_panel()
+
+    def simulation_panel(self):
+        self.sim_view = SimulationView()
+        self.map_page.addWidget(self.sim_view)
+        panel = QFrame()
+        panel.setObjectName("card")
+        self.sidebar.addWidget(panel)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        layout.addWidget(label("Simulation control", "heading"))
+        layout.addWidget(label("Seed", "field"))
+        self.seed = QLineEdit()
+        self.seed.setAccessibleName("Mission seed")
+        self.seed.setPlaceholderText("Random each run")
+        layout.addWidget(self.seed)
+        self.catalog = json.loads((CONTRACT / "apps.json").read_text())
+        self.launch_app = self.button(layout, "Run mission", lambda: self.app_command("start"))
+        self.launch_app.setObjectName("primary")
+        self.stop_app = self.button(layout, "Stop simulation", lambda: self.app_command("stop"))
+        self.stop_app.setObjectName("abort")
+        self.stop_app.setIcon(icon("stop"))
+        layout.addWidget(label("Job status", "section"))
         self.job_label = label("", "muted")
         self.job_label.setWordWrap(True)
         layout.addWidget(self.job_label)
+        stats = QFormLayout()
+        stats.setVerticalSpacing(8)
+        stats.setHorizontalSpacing(18)
+        self.sim_values = []
+        for caption in ("Seed used", "Targets queued", "Heading"):
+            value = label("—", "meter")
+            stats.addRow(label(caption, "field"), value)
+            self.sim_values.append(value)
+        layout.addLayout(stats)
         layout.addStretch()
 
     def menus(self):
@@ -572,7 +601,7 @@ class Window(QMainWindow):
 
         files = self.menuBar().addMenu("&File")
         self.open_recording_action = action(files, "Open recording…", self.open_recording, "Ctrl+O")
-        self.demo_button = QAction("Demo replay", self)
+        self.demo_button = QAction("Open example recording…", self)
         self.demo_button.triggered.connect(self.show_demo)
         files.addAction(self.demo_button)
         files.addAction(self.open_logs.action)
@@ -582,15 +611,12 @@ class Window(QMainWindow):
 
         view = self.menuBar().addMenu("&View")
         for i in range(self.tabs.count()):
-            item = action(
+            action(
                 view,
                 self.tabs.tabText(i),
                 lambda checked=False, i=i: self.tabs.setCurrentIndex(i),
                 f"Ctrl+{i + 1}",
             )
-            if i == self.sim_tab:
-                self.sim_map_action = item
-                item.setVisible(False)
         view.addSeparator()
         self.follow = view.addAction("Follow vehicle")
         self.follow.setCheckable(True)
@@ -602,7 +628,7 @@ class Window(QMainWindow):
         self.site_action = action(view, "Center on demo site", self.locate_site)
         action(view, "Restore default layout", self.restore_layout)
 
-        mission = self.menuBar().addMenu("&Mission")
+        mission = self.mission_menu = self.menuBar().addMenu("&Mission")
         for item in (self.start.action, self.add_target.action, self.scan.action, self.halt, self.abort):
             mission.addAction(item)
         self.add_target.action.setShortcut("Ctrl+N")
@@ -610,7 +636,6 @@ class Window(QMainWindow):
         tools = self.menuBar().addMenu("&Tools")
         action(tools, "Radio connection…", self.radio_dialog.show)
         tools.addAction(self.health_action)
-        action(tools, "Jetson simulations…", self.apps_dialog.show)
         action(tools, "Preferences…", self.preferences).setMenuRole(
             QAction.MenuRole.PreferencesRole
         )
@@ -634,7 +659,7 @@ class Window(QMainWindow):
             "Connect the USB radio from the header. Wait for Radio ready, then start a supervised session.\n\n"
             "Use Add FOD or click the map. Enter ellipsoid altitude, preview the location and send. Select a marker, target row or target event to inspect its history.\n\n"
             "Finish scanning closes submissions. Review opens automatically. Use Open operator review in the inspector to return to a deferred decision. Abort to base requests a return.\n\n"
-            "Open recordings and export evidence from File. Jetson simulation jobs are under Tools.",
+            "Open recordings and export evidence from File. Select Simulation in the header to run a seeded Nav2 mission.",
         )
 
     def open_recording(self):
@@ -687,6 +712,26 @@ class Window(QMainWindow):
             self.settings.setValue("follow", follow.isChecked())
             self.follow.setChecked(follow.isChecked())
 
+    def field_busy(self):
+        return bool(self.station and self.station.session and self.station.state not in
+                    ("completed", "canceled", "halted", "rejected"))
+
+    def set_workspace(self, simulation):
+        self.simulation = bool(simulation and not self.field_busy())
+        self.field_button.setChecked(not self.simulation)
+        self.sim_button.setChecked(self.simulation)
+        self.map_page.setCurrentWidget(self.sim_view if self.simulation else self.field_map)
+        self.sidebar.setCurrentIndex(int(self.simulation))
+        self.mission_menu.menuAction().setVisible(not self.simulation)
+        for item in (self.site_action, self.follow, self.fit_route.action, self.health_action):
+            item.setVisible(not self.simulation)
+        if self.simulation:
+            self.draft_dialog.hide()
+            self.invalidate_draft()
+            self.review_page.reject()
+            self.health_action.setChecked(False)
+        self.tick()
+
     def restore_layout(self):
         self.tabs.setCurrentWidget(self.map_page)
         self.splitter.setSizes([900, 350])
@@ -728,19 +773,25 @@ class Window(QMainWindow):
         snap = self.app_snapshot
         if not self.radio or not self.radio.ready or not self.app_fresh():
             raise ValueError("Wait for Jetson status.")
-        key = self.app_choice.currentData()
-        scenario = self.scenario.currentText() if key == "scenario" else ""
-        timeout = bool(scenario and self.wait_timeout.isChecked())
+        if not self.simulation or self.field_busy() or self.pending_until:
+            raise ValueError("Simulation control is unavailable.")
         if operation == "stop":
-            if snap.state != "running":
+            if snap.state != "running" or not snap.job_id:
                 raise ValueError("No running simulation.")
-            request, key, scenario, timeout = snap.job_id, snap.app, "", False
-        else:
-            if snap.state in ("running", "stopping"):
-                raise ValueError("A simulation is already active.")
+            request, key, scenario = snap.job_id, snap.app, ""
+        elif operation == "start":
+            if snap.state not in ("idle", "finished", "failed", "stopped"):
+                raise ValueError("Wait for the current job to finish.")
+            key = "seeded-mission"
+            scenario = self.seed.text().strip() or str(secrets.randbits(32))
+            if len(scenario) > 10 or not scenario.isascii() or not scenario.isdecimal() or int(scenario) > self.catalog[key]["seed_max"]:
+                raise ValueError("Seed must be between 0 and 4294967295.")
+            scenario = str(int(scenario))
             request = uuid4().hex
+        else:
+            raise ValueError("Unknown simulation command.")
         msg = self.codec.types["AppCommand"](
-            self.codec.stamp(), request, operation, key, scenario, timeout
+            self.codec.stamp(), request, operation, key, scenario, False
         )
         self.station.send(21, msg, f"{operation.capitalize()} {key} {scenario}".strip())
         self.pending_until = time.monotonic() + 5
@@ -767,16 +818,20 @@ class Window(QMainWindow):
             running_sim = bool(snap and snap.job_id == view.job and snap.state == "running")
             fresh_sim = running_sim and 0 <= time.time_ns()//1_000_000 - view.stamp < 3000
             phase = self.fsm_panel.states.get(view.code, ("Unknown phase", ""))[0]
-            state = snap.state.capitalize() if snap and snap.job_id == view.job else "Status unavailable"
-            view.phase.setText(f"Simulation · {phase if fresh_sim else state}")
             view.detail.setText(
-                f"Targets remaining: {view.queued}   ·   Heading: {view.plot.trace['fixes'][-1][3]}°   ·   Local metres" if fresh_sim else
+                "Live track · local metres" if fresh_sim else
                 "Waiting for a current simulation sample" if running_sim else "Last received simulation track"
             )
             if view.plot.show_robot != fresh_sim:
                 view.plot.show_robot = fresh_sim
                 view.plot.update()
-        if view.job and self.fsm_panel.source.currentIndex() == 1:
+        for widget, value in zip(self.sim_values, (
+            str(view.seed) if view.seed is not None else "—",
+            str(view.queued) if fresh_sim else "—",
+            f"{view.plot.trace['fixes'][-1][3]}°" if fresh_sim else "—",
+        )):
+            widget.setText(value)
+        if self.simulation:
             self.fsm_panel.display_simulation(view.code if fresh_sim else 0, view.stamp)
         else:
             self.fsm_panel.display(snap, ready, idle)
@@ -794,27 +849,32 @@ class Window(QMainWindow):
             self.pending_until = 0
             self.event_line("Jetson did not confirm the request. Check the reported job state.")
         pending = bool(self.pending_until)
-        running = snap and snap.state in ("running", "stopping")
-        available = bool(snap and not running and not pending)
-        self.app_choice.setEnabled(available)
-        scenario = self.app_choice.currentData() == "scenario"
-        self.scenario.setVisible(scenario)
-        self.wait_timeout.setVisible(scenario)
-        self.scenario.setEnabled(available)
-        self.wait_timeout.setEnabled(available)
+        available = bool(self.simulation and not self.field_busy() and snap and snap.state in
+                         ("idle", "stopped", "finished", "failed") and not pending)
+        self.seed.setEnabled(not pending and not (snap and snap.state in ("running", "stopping")))
         self.launch_app.setEnabled(available)
-        self.stop_app.setEnabled(bool(snap and snap.state == "running" and not pending))
-        self.job_label.setText(
-            "Waiting for Jetson confirmation"
-            if pending
-            else self.sim_view.phase.text() if snap and snap.detail.startswith("sim1:")
-            else f"{snap.state.capitalize()}  {snap.detail}"
-            if snap
-            else "Waiting for current Jetson status"
-        )
+        active_job = bool(snap and snap.state in ("running", "stopping"))
+        self.stop_app.setVisible(active_job)
+        self.launch_app.setVisible(not active_job)
+        self.stop_app.setEnabled(bool(self.simulation and snap and snap.state == "running" and not pending))
+        self.job_label.setToolTip(snap.detail if snap else "")
+        if pending:
+            status = "Waiting for Jetson confirmation"
+        elif snap is None:
+            status = "Waiting for current Jetson status" if self.radio else "Connect the radio to run a mission."
+        elif snap.state == "running":
+            status = phase if fresh_sim else "Waiting for simulation telemetry"
+        elif snap.state == "failed" and snap.detail == "Unknown app":
+            status = "Update the Jetson supervisor to run seeded missions."
+        elif snap.state in ("failed", "stopped", "stopping"):
+            status = f"{snap.state.capitalize()} · {snap.detail}"
+        else:
+            status = "Jetson ready" if snap.state == "idle" else snap.state.capitalize()
+        self.job_label.setText(status)
+
 
     def show_review(self):
-        if self.open_review.isHidden():
+        if self.simulation or self.open_review.isHidden():
             return
         root = self.centralWidget()
         self.scrim.setGeometry(root.rect())
@@ -1001,10 +1061,6 @@ class Window(QMainWindow):
         self.app_snapshot = None
         self.pending_until = 0
         self.sim_view.reset()
-        self.tabs.setTabVisible(self.sim_tab, False)
-        self.fsm_panel.source.setCurrentIndex(0)
-        self.fsm_panel.source.hide()
-        self.sim_map_action.setVisible(False)
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1013,7 +1069,7 @@ class Window(QMainWindow):
 
     def start_session(self):
         st = self.station
-        if not st or not self.radio.ready:
+        if not self.start.isEnabled() or not st or not self.radio.ready:
             return
         if st.state == "awaiting acceptance":
             self.station.retry_start()
@@ -1039,7 +1095,7 @@ class Window(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         if dialog.exec():
-            if self.station is not st or not self.radio.ready:
+            if self.station is not st or not self.radio.ready or not self.start.isEnabled():
                 raise ValueError("Connection changed. Start canceled.")
             callsign, area, x, y, yaw = [e.text().strip() for e in edits]
             self.station.start(callsign, area, (float(x), float(y), math.radians(float(yaw))))
@@ -1058,7 +1114,7 @@ class Window(QMainWindow):
 
     def add(self):
         if (
-            not self.station
+            self.simulation or not self.station
             or not self.radio.ready
             or self.draft != tuple(e.text() for e in self.coords)
         ):
@@ -1077,11 +1133,11 @@ class Window(QMainWindow):
 
     def confirm(self, command, prompt):
         st = self.station
-        if not st:
+        if self.simulation or not st:
             return
         session = st.session
         if QMessageBox.question(self, "Mission control", prompt) == QMessageBox.StandardButton.Yes:
-            if self.station is not st or st.session != session or not self.radio.ready:
+            if self.simulation or self.station is not st or st.session != session or not self.radio.ready:
                 raise ValueError("Connection or session changed. Request canceled.")
             st.command(command)
             self.event_line(
@@ -1093,6 +1149,8 @@ class Window(QMainWindow):
             self.tick()
 
     def decide(self, decision):
+        if self.simulation or not self.station:
+            return
         self.station.decide(self.shown, decision)
         self.event_line("Sent " + decision + "; awaiting UGV report")
         self.tick()
@@ -1189,25 +1247,15 @@ class Window(QMainWindow):
                                 and (self.pending_op == "start" or msg.state != "running")
                             ):
                                 self.pending_until = 0
+                            if self.sim_view.job != msg.job_id:
+                                self.sim_view.reset()
+                                self.sim_view.job = msg.job_id
                             if msg.state == "running" and msg.job_id:
-                                if self.sim_view.job != msg.job_id:
-                                    self.sim_view.reset()
-                                    self.sim_view.job = msg.job_id
-                                    self.sim_view.plot.obstacles = OBSTACLES_XY if msg.app == "nav2-demo" else ()
-                                    self.tabs.setTabVisible(self.sim_tab, True)
-                                    self.sim_map_action.setVisible(True)
-                                    self.fsm_panel.source.show()
-                                    if not self.station.operating:
-                                        self.fsm_panel.source.setCurrentIndex(1)
-                                        self.tabs.setCurrentWidget(self.sim_view)
-                                        self.apps_dialog.hide()
+                                if self.sim_view.accept_scene(msg.detail):
+                                    self.journal.log("sim_layout", msg.detail, job_id=msg.job_id)
                                 if self.sim_view.accept(msg, stamp):
                                     self.journal.log("sim_preview", msg.detail, job_id=msg.job_id)
-                            if previous is None or (
-                                previous.job_id,
-                                previous.state,
-                                previous.detail.split(":", 1)[0],
-                            ) != (msg.job_id, msg.state, msg.detail.split(":", 1)[0]):
+                            if previous is None or (previous.job_id, previous.state) != (msg.job_id, msg.state):
                                 self.event_line(f"Jetson  ·  {msg.app} {msg.state}")
                                 self.journal.log(
                                     "app_status",
@@ -1283,10 +1331,6 @@ class Window(QMainWindow):
         self.radio = self.journal = self.station = None
         self.track = LocationTrack()
         self.sim_view.reset()
-        self.tabs.setTabVisible(self.sim_tab, False)
-        self.fsm_panel.source.setCurrentIndex(0)
-        self.fsm_panel.source.hide()
-        self.sim_map_action.setVisible(False)
         self.runway.reset_view()
         self.connect_button.setText("Connect")
         self.last_rx = None
@@ -1315,6 +1359,9 @@ class Window(QMainWindow):
             self.runway.update()
         self.clear_track.setEnabled(bool(tracks.fixes))
         self.update_location(ready)
+        if self.simulation and self.field_busy():
+            self.set_workspace(False)
+            return
         self.update_cockpit(ready)
         st = self.station
         points = demo_obstacles(st.area, st.callsign) if st and st.session else ()
@@ -1323,8 +1370,9 @@ class Window(QMainWindow):
             self.runway.update()
         self.obstacle_key.setVisible(bool(points))
         self.map_heading.setText("Demo site" if self.runway.center == SITE else "Route map")
-        self.telemetry_strip.setVisible(self.radio is not None)
-        self.inspector_card.setVisible(self.radio is not None)
+        self.sim_button.setEnabled(not self.field_busy())
+        self.sim_button.setToolTip("Finish the field session first" if self.field_busy() else "Seeded Nav2 missions")
+        self.telemetry_strip.setVisible(self.radio is not None and not self.simulation)
         self.fit_route.setEnabled(
             bool(self.runway.targets or tracks.fixes or tracks.ahead or points)
         )
@@ -1377,7 +1425,8 @@ class Window(QMainWindow):
             "Field session input is unavailable. Check the Jetson bringup profile and health." if adapter_offline else ""
         )
         self.start.setEnabled(
-            ready
+            ready and not self.simulation
+            and not (self.pending_until or (self.app_fresh() and self.app_snapshot.state in ("running", "stopping")))
             and not adapter_offline
             and (
                 not st.session
@@ -1391,16 +1440,16 @@ class Window(QMainWindow):
                 )
             )
         )
-        self.start.setVisible(self.radio is not None and not (st and st.operating))
+        self.start.setVisible(not (st and st.operating))
         closed = bool(st and st.scanned)
         self.scan_state.setVisible(closed)
         self.scan.setVisible(bool(st and st.operating and not closed))
         self.add_target.setVisible(bool(st and st.operating and not closed))
-        self.stops.setVisible(self.radio is not None)
-        self.stops.setEnabled(ready)
-        self.halt.setEnabled(bool(ready and st.can_halt))
-        self.abort.setEnabled(bool(ready and st.operating and st.state != "returning"))
-        scanning = bool(ready and st.operating and not st.scanned and not st.scanning_requested)
+        self.stops.setVisible(self.radio is not None and not self.simulation)
+        self.stops.setEnabled(ready and not self.simulation)
+        self.halt.setEnabled(bool(ready and not self.simulation and st.can_halt))
+        self.abort.setEnabled(bool(ready and not self.simulation and st.operating and st.state != "returning"))
+        scanning = bool(ready and not self.simulation and st.operating and not st.scanned and not st.scanning_requested)
         self.scan.setText(
             "Scanning closed"
             if st and st.scanned
@@ -1432,21 +1481,18 @@ class Window(QMainWindow):
                 if x
             )
             if st and st.session
-            else f"Jetson simulation · {self.app_snapshot.state}"
+            else "Simulation running · field start unavailable"
             if self.app_fresh() and self.app_snapshot.state in ("running", "stopping")
             else "Field standby · mission inputs disabled"
             if ready and adapter_offline and self.app_fresh() and self.app_snapshot.fsm_state
             else "Waiting for mission adapter"
             if ready and adapter_offline
+            else "Connect the radio to start a session." if not self.radio
             else "No active session"
         )
         self.status.setToolTip(note or self.status.text())
-        self.phase_readout.setText(
-            self.sim_view.phase.text() if self.sim_view.job and self.app_fresh() and self.app_snapshot.state == "running" and not st.operating
-            else self.fsm_panel.states.get(self.app_snapshot.fsm_state, ("Awaiting field state", ""))[0]
-            if self.sim_view.job and self.app_fresh()
-            else self.fsm_panel.current.text()
-        )
+        self.phase_readout.setVisible(self.radio is not None)
+        self.phase_readout.setText(self.fsm_panel.current.text())
         active = st.active if st else ""
         # Selection reports and session snapshots arrive independently. The station
         # orders them by UGV stamp; review decisions still use the session's own ID.
@@ -1744,6 +1790,12 @@ if __name__ == "__main__":
                     QTest.mouseClick(buttons["Satellite"], Qt.MouseButton.LeftButton)
                 QTest.mouseClick(buttons["Street"], Qt.MouseButton.LeftButton)
                 wait_for_tile("Street", view.zoom)
+            window.sim_button.click()
+            if window.map_page.currentWidget() is not window.sim_view or window.launch_app.isEnabled():
+                raise RuntimeError("Offline simulation workspace is unavailable or armed")
+            window.field_button.click()
+            if window.map_page.currentWidget() is not window.field_map:
+                raise RuntimeError("Field map did not restore")
             replay = DemoReplay(window)
             replay.slider.setValue(replay.slider.maximum())
             if replay.phase.text() != "Mission complete at base":
@@ -1760,7 +1812,7 @@ if __name__ == "__main__":
             ):
                 raise RuntimeError("Packaged robot location failed the CDR round trip")
             launch = window.codec.types["AppCommand"](
-                window.codec.stamp(), "a" * 32, "start", "scenario", "retry", False
+                window.codec.stamp(), "a" * 32, "start", "seeded-mission", "42", False
             )
             if (
                 window.codec.decode(window.codec.encode(launch), radio.engine.topics[21].type)

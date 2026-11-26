@@ -9,7 +9,6 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
@@ -154,11 +153,6 @@ class FsmPanel(QWidget):
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         self.detail.setTextFormat(Qt.TextFormat.PlainText)
-        self.source = QComboBox()
-        self.source.addItems(["Field robot", "Jetson simulation"])
-        self.source.setAccessibleName("State machine source")
-        self.source.hide()
-        layout.addWidget(self.source, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.current)
         layout.addWidget(self.detail)
         bar = QHBoxLayout()

@@ -354,13 +354,16 @@ def test_jetson_instruments_and_stale_app_controls(window, monkeypatch):
     msg = w.codec.types["FieldStatus"](w.codec.stamp(), "", "", "idle", "", 75, 1, False, 0, 0)
     w.radio.receive(24, w.codec.encode(msg))
     w.tick()
-    assert not w.start.isEnabled() and w.launch_app.isEnabled()
+    assert not w.start.isEnabled() and not w.launch_app.isEnabled()
     assert [widget.text() for widget in w.instruments] == ["75%", "Active", "—"]
-    w.app_choice.setCurrentIndex(w.app_choice.findData("scenario"))
-    w.scenario.setCurrentText("retry")
-    w.wait_timeout.setChecked(True)
+    w.sim_button.click()
+    assert not sent and w.launch_app.isEnabled() and not w.start.isEnabled()
+    w.seed.setText("4294967296")
     w.launch_app.click()
-    assert len(sent) == 1 and sent[0].scenario == "retry" and sent[0].wait_timeout
+    assert not sent
+    w.seed.setText("42")
+    w.launch_app.click()
+    assert len(sent) == 1 and sent[0].scenario == "42" and not sent[0].wait_timeout
     assert not w.launch_app.isEnabled() and not w.stop_app.isEnabled()
     msg.job_id, msg.state, msg.stamp = sent[0].request_id, "running", w.codec.stamp()
     w.radio.receive(24, w.codec.encode(msg))
@@ -919,11 +922,14 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     w.radio.receive(24, w.codec.encode(msg))
     w.tick()
     view = w.sim_view
-    assert w.tabs.currentWidget() is view and view.plot.trace["target"] == (3, -.75)
+    assert w.map_page.currentWidget() is w.field_map
+    assert w.fsm_panel.chart.active == "BRING_UP_SYSTEM"
+    w.sim_button.click()
+    assert w.map_page.currentWidget() is view and view.plot.trace["target"] == (3, -.75)
     assert view.plot.trace["fixes"][-1][1:] == (1.5, -.5, 45)
     assert w.runway.robot is None and not w.runway.tracks.fixes
     assert w.fsm_panel.chart.active == "NAVIGATION_MODE"
-    w.fsm_panel.source.setCurrentIndex(0)
+    w.field_button.click()
     w.tick()
     assert w.fsm_panel.chart.active == "BRING_UP_SYSTEM"
     msg.detail = "sim1:" + json.dumps([ms+1, 4, 9999999, 50, 0, 0])
@@ -932,4 +938,43 @@ def test_sim_samples_use_separate_map_and_chart(window, monkeypatch):
     w.tick()
     assert not view.plot.show_robot and w.fsm_panel.chart.active is None
     w.disconnect()
-    assert not w.tabs.isTabVisible(w.sim_tab) and not view.plot.trace["fixes"]
+    assert w.map_page.currentWidget() is w.field_map and not view.plot.trace["fixes"]
+
+
+
+def test_workspace_switch_preserves_navigation_and_field_authority(window, monkeypatch):
+    w = window
+    monkeypatch.setattr(gs.Radio, "start", lambda self: None)
+    monkeypatch.setattr(gs.Radio, "close", lambda self: None)
+    sent = []
+    monkeypatch.setattr(gs.Radio, "send", lambda self, topic, msg: sent.append(topic) or 1)
+    w.port.setCurrentText("fixture")
+    w.connect_radio()
+    w.radio.ready = True
+    w.tabs.setCurrentWidget(w.fsm_panel)
+    w.sim_button.click()
+    assert w.tabs.currentWidget() is w.fsm_panel
+    assert w.map_page.currentWidget() is w.sim_view and w.mission_menu.menuAction().isVisible() is False
+    assert w.fsm_panel.chart.active is None
+    w.start_session()
+    w.confirm("cancel", "Halt")
+    assert not sent
+    w.field_button.click()
+    w.station.session, w.station.state = "active-field", "working"
+    w.tick()
+    assert not w.sim_button.isEnabled()
+    w.set_workspace(True)
+    assert not w.simulation and w.map_page.currentWidget() is w.field_map
+    assert not sent and w.radio.ready
+
+
+def test_simulation_layout_is_bounded_and_reset_per_job(window):
+    view = window.sim_view
+    data = [4294967295, [[1, 2, 3, 4]] * 3, [[10, -30]] * 3]
+    for value in ([True, *data[1:]], [0, [], data[2]], [0, [[-900, 0, 2, 3]]*3, data[2]]):
+        assert not view.accept_scene("scene1:" + json.dumps(value))
+    assert view.accept_scene("scene1:" + json.dumps(data))
+    assert view.seed == 4294967295 and view.plot.targets[0] == [.1, -.3]
+    assert not view.accept_scene("scene1:" + json.dumps([42, *data[1:]]))
+    view.reset()
+    assert view.seed is None and not view.plot.targets and not view.plot.barriers

@@ -36,31 +36,31 @@ def wait(check, seconds=15):
 
 try:
     w.connect_radio()
+    w.sim_button.click()
     wait(w.launch_app.isEnabled)
     assert w.app_snapshot.state in ("idle", "stopped", "finished", "failed")
     assert not w.app_snapshot.mission_adapter_online
     assert [v.text() for v in w.instruments] == ["—"] * 3
     print("Journal:", w.journal.folder, flush=True)
     print("PASS matched serial peers, fresh idle status, absent sensors unknown", flush=True)
-    w.app_choice.setCurrentIndex(w.app_choice.findData("scenario"))
-    w.scenario.setCurrentText("nav-rejected")
+    w.seed.setText("952741458")
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
-    wait(lambda: w.sim_view.stamp > 0 and w.tabs.currentWidget() is w.sim_view, 45)
-    assert w.sim_view.plot.trace["fixes"] and w.runway.robot is None
-    wait(lambda: w.app_snapshot.state in ("finished", "failed"), 120)
+    wait(lambda: w.sim_view.seed == 952741458 and w.sim_view.stamp > 0, 45)
+    assert w.sim_view.plot.targets and w.sim_view.plot.barriers and w.runway.robot is None
+    wait(lambda: w.app_snapshot.state in ("finished", "failed"), 600)
     assert w.app_snapshot.state == "finished", w.app_snapshot.detail
-    print("PASS actual nav-rejected scenario completed", w.app_snapshot.detail, flush=True)
-    w.app_choice.setCurrentIndex(w.app_choice.findData("nav2-demo"))
+    print("PASS seeded Nav2 mission completed", w.app_snapshot.detail, flush=True)
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
     wait(lambda: len(w.sim_view.plot.trace["fixes"]) >= 3 and any(x or y for _, x, y, _ in w.sim_view.plot.trace["fixes"]), 60)
+    w.show()
+    w.grab().save(str(w.journal.folder / "simulation-workspace.png"))
     print("PASS received changing Nav2 simulation position and FSM over serial", flush=True)
-    assert w.stop_app.action in w.stop_menu.actions()
-    w.stop_app.action.trigger()
+    w.stop_app.click()
     wait(lambda: w.app_snapshot.state == "stopped")
     assert w.radio.ready and w.launch_app.isEnabled()
-    print("PASS header simulation stop confirmed; radio still ready", flush=True)
+    print("PASS simulation stop confirmed; radio still ready", flush=True)
     w.launch_app.click()
     wait(w.stop_app.isEnabled)
     running = w.app_snapshot.job_id

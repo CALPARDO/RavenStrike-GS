@@ -14,7 +14,7 @@ if sys.argv[1] == "field":
         path.with_suffix(".roundtrip").write_bytes(codec.encode(value))
     for msg in [
         codec.stamp(),
-        codec.types["AppCommand"](codec.stamp(), "a" * 32, "start", "scenario", "retry", True),
+        codec.types["AppCommand"](codec.stamp(), "a" * 32, "start", "seeded-mission", "4294967295", False),
         codec.control("s-23", "UGV-1", "test", (1.125, -3.0, 1.5708), "start"),
         codec.gps("s-23", "fod-1", "UGV-1", 40.0, -82.99997, 201.5),
         codec.types["OperatorDecision"](codec.stamp(), "s-23", "fod-1", "ev123", "approve"),
@@ -37,7 +37,7 @@ else:
             PlanPreview(coordinates_e7=[275178880, -820841530, 275179880, -820842530]),
             FieldStatus(
                 job_id="a" * 32,
-                app="scenario",
+                app="seeded-mission",
                 state="running",
                 battery_percent=-1,
                 estop=1,
@@ -73,6 +73,8 @@ else:
             raw = path.read_bytes()
             value = deserialize_message(raw, cls)
             assert deserialize_message(serialize_message(value), cls) == value, cls
+            if hasattr(value, "request_id"):
+                assert value.scenario == "4294967295" and value.app == "seeded-mission"
             if hasattr(value, "location"):
                 assert value.location.altitude == 201.5
             if hasattr(value, "home"):

@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QDialog,
@@ -25,6 +25,8 @@ class GroundTrack(QWidget):
         super().__init__()
         self.trace = trace
         self.elapsed = 0
+        self.barriers = []
+        self.targets = []
         self.obstacles = OBSTACLES_XY
         self.show_robot = True
         self.setMinimumSize(360, 200)
@@ -65,6 +67,16 @@ class GroundTrack(QWidget):
             obstacle_point(p, QPointF(self.width() - 110, 17))
             p.setPen(QColor("#563d15"))
             p.drawText(self.width() - 97, 22, "Sim obstacle")
+        p.setPen(QPen(QColor("#b5986b"), 1))
+        p.setBrush(QColor("#ded0b8"))
+        for west, south, east, north in self.barriers:
+            p.drawRect(QRectF(project(west, north), project(east, south)))
+        for i, xy in enumerate(self.targets, 1):
+            point = project(*xy)
+            p.setPen(QPen(QColor("#576b74"), 1))
+            p.setBrush(QColor("#ffffff"))
+            p.drawEllipse(point, 4, 4)
+            p.drawText(point + QPointF(7, 13), f"F{i}")
         for xy in self.obstacles:
             obstacle_point(p, project(*xy))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -177,18 +189,56 @@ class SimulationView(QWidget):
         self.detail.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.phase)
         layout.addWidget(self.detail)
+        self.phase.setTextFormat(Qt.TextFormat.PlainText)
         self.plot = GroundTrack({"fixes": [], "target": (0, 0), "target_time": math.inf})
         layout.addWidget(self.plot, 1)
+        legend = QHBoxLayout()
+        for text, color in (("━  Traveled", "#14756a"), ("●  Active FOD", "#98521f"),
+                            ("○  Assigned FOD", "#53636d"), ("■  Obstacle", "#896e46")):
+            item = QLabel(text)
+            item.setStyleSheet(f"color: {color}; font-weight: 600")
+            legend.addWidget(item)
+        legend.addStretch()
+        layout.addLayout(legend)
         self.reset()
 
     def reset(self):
         self.job = ""
+        self.seed = None
+        self.plot.obstacles = ()
+        self.plot.barriers = []
+        self.plot.targets = []
+        self.phase.setText("Simulation map")
+        self.detail.setText("Local coordinates in metres")
         self.stamp = self.code = 0
         self.plot.trace["fixes"].clear()
         self.plot.trace["target_time"] = math.inf
-        self.plot.bounds = [-1, 1, -1, 1]
+        self.plot.bounds = [-8, 8, -8, 8]
         self.plot.show_robot = False
         self.plot.update()
+
+    def accept_scene(self, detail):
+        if self.seed is not None or len(detail) > 263 or not detail.startswith("scene1:"):
+            return False
+        try:
+            seed, barriers, targets = json.loads(detail[7:])
+            if type(seed) is not int or not 0 <= seed < 2**32:
+                return False
+            for rows, width in ((barriers, 4), (targets, 2)):
+                if (not isinstance(rows, list) or not 3 <= len(rows) <= 5
+                        or any(not isinstance(r, list) or len(r) != width
+                               or any(type(v) is not int or abs(v) > 800 for v in r) for r in rows)):
+                    return False
+            if any(w >= e or s >= n for w, s, e, n in barriers):
+                return False
+        except (ValueError, TypeError, RecursionError):
+            return False
+        self.seed = seed
+        self.plot.barriers = [[v / 100 for v in row] for row in barriers]
+        self.plot.targets = [[v / 100 for v in row] for row in targets]
+        self.plot.bounds = [-8, 8, -8, 8]
+        self.plot.update()
+        return True
 
     def accept(self, msg, stamp):
         if not msg.detail.startswith("sim1:") or len(msg.detail) > 133:

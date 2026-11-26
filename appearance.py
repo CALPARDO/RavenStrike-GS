@@ -40,6 +40,10 @@ def field_theme(app):
         QMainWindow, QScrollArea, QWidget#workspace { background: #f1f5f6; }
         QFrame#header, QFrame#card, QFrame#footer, QTabWidget::pane { background: white; }
         QFrame#header { background: #172f38; border-bottom: 2px solid #288c84; }
+        QWidget#workspaceSwitch { background: #0e242c; border-radius: 6px; }
+        QPushButton#workspaceButton { background: transparent; color: #c3d6db; border: 1px solid transparent; padding: 5px 15px; }
+        QPushButton#workspaceButton:checked { background: #e3f2ee; color: #124e49; }
+        QPushButton#workspaceButton:disabled { color: #8e9fa6; }
         QLabel#headerText { color: #d4e8e7; font-weight: 550; }
         QLabel#meter, QLabel#clock { font-family: monospace; font-weight: 650; }
         QLabel#phase { color: #09685f; font-size: 15px; font-weight: 650; padding-bottom: 4px; }
