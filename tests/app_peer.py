@@ -20,6 +20,11 @@ def pty_config(*args, **kwargs):
 
 if sys.argv[1].startswith("/dev/pts/"):
     radio.load_config = pty_config
+    # Reproduce the field laptop lag without changing the host, ROS or monotonic clocks.
+    wall_ns = time.time_ns
+    time.time_ns = lambda: wall_ns() - 700_000_000
+    time.time = lambda: time.time_ns() / 1e9
+    print("Virtual serial bench: GS wall clock 700 ms behind Jetson", flush=True)
 app = QApplication([])
 w = gs.Window()
 w.port.setCurrentText(sys.argv[1])

@@ -3,6 +3,12 @@
 import time
 
 
+# The UGV admits heartbeats up to one second old. Allow the same clock
+# difference on received telemetry. Commands are validated separately onboard.
+def telemetry_time_ok(stamp_ns, now_ns):
+    return -1_000_000_000 <= now_ns - stamp_ns < 3_000_000_000
+
+
 class LocationTrack:
     def __init__(self):
         self.connected = time.time_ns()
@@ -11,12 +17,13 @@ class LocationTrack:
 
     def accept(self, msg):
         stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
-        age = time.time_ns() - stamp
+        now = time.time_ns()
+        age = now - stamp
         if (
             not 0 <= msg.stamp.nanosec < 10**9
             or stamp < self.connected
             or stamp <= self.stamp
-            or not -200_000_000 <= age <= 3_000_000_000
+            or not telemetry_time_ok(stamp, now)
             or not -900_000_000 <= msg.latitude_e7 <= 900_000_000
             or not -1_800_000_000 <= msg.longitude_e7 <= 1_800_000_000
             or not (0 <= msg.heading_cdeg < 36000 or msg.heading_cdeg == 65535)
@@ -34,7 +41,7 @@ class LocationTrack:
     def current(self):
         if (
             time.monotonic_ns() < self.expires
-            and -200_000_000 <= time.time_ns() - self.stamp <= 3_000_000_000
+            and telemetry_time_ok(self.stamp, time.time_ns())
         ):
             return self.position
         return None

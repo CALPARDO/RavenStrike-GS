@@ -68,7 +68,7 @@ from demo_site import SITE, SITE_ZOOM, demo_obstacles
 from display import TargetNames, eastern
 from fsm_panel import FsmPanel
 from health_panel import PROBES, HealthPanel
-from location import LocationTrack
+from location import LocationTrack, telemetry_time_ok
 from map_tracks import route_points
 from radio import Radio
 from runway_map import RunwayMap
@@ -102,6 +102,16 @@ def build_id():
         except (OSError, subprocess.SubprocessError):
             pass
     return "source"
+
+
+def coordinate_value(text, name):
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        raise ValueError(f"Enter a finite number for {name}.")
+    return value
 
 
 def label(text, name=""):
@@ -185,6 +195,7 @@ class Window(QMainWindow):
         self.codec = Codec()
         self.tests_dialog = None
         self.app_snapshot = None
+        self.status_warning = ""
         self.app_stamp = self.app_received = self.pending_until = 0
         self.track = LocationTrack()
         self.radio = self.station = self.journal = None
@@ -933,7 +944,7 @@ class Window(QMainWindow):
         return (
             self.app_snapshot is not None
             and time.monotonic() - self.app_received < 3
-            and (-0.2 <= (time.time_ns() - self.app_stamp) / 1e9 < 3)
+            and telemetry_time_ok(self.app_stamp, time.time_ns())
         )
 
     def update_cockpit(self, ready):
@@ -945,7 +956,7 @@ class Window(QMainWindow):
         view = self.sim_view
         running_sim = bool(snap and snap.job_id == view.job and snap.state in SIM_ACTIVE[:-1])
         now_ms = time.time_ns() // 1_000_000
-        fresh_sim = running_sim and 0 <= now_ms - view.stamp < 3000
+        fresh_sim = running_sim and telemetry_time_ok(view.stamp * 1_000_000, now_ms * 1_000_000)
         phase, state_name = self.fsm_panel.states.get(view.code, ("Unknown phase", "Unknown state"))
         if view.stamp:
             phase_label = state_name.replace("_", " ").capitalize()
@@ -963,8 +974,15 @@ class Window(QMainWindow):
                     reason = f"Simulation {snap.state}"
                 view.detail.setText(f"{reason} · last sample {eastern(view.stamp / 1000)} ET")
         else:
-            view.phase.setText("Waiting for first FSM sample" if running_sim else "No simulation state received")
-            view.detail.setText("Local coordinates in metres")
+            if running_sim:
+                view.phase.setText("Waiting for first FSM sample")
+                view.detail.setText("The Jetson is starting the mission.")
+            elif snap and snap.state == "idle":
+                view.phase.setText("No simulation running")
+                view.detail.setText("Select Run mission to start.")
+            else:
+                view.phase.setText(f"Simulation {snap.state}" if snap else "Waiting for Jetson status")
+                view.detail.setText(self.status_warning or ("Connect the radio." if not self.radio else ""))
         historical = not fresh_sim
         if view.plot.historical != historical or view.plot.show_robot != bool(view.stamp):
             view.plot.historical = historical
@@ -1028,7 +1046,7 @@ class Window(QMainWindow):
         if pending:
             status = "Waiting for Jetson confirmation"
         elif snap is None:
-            status = "Waiting for current Jetson status" if self.radio else "Connect the radio to run a mission."
+            status = (self.status_warning or "Waiting for current Jetson status") if self.radio else "Connect the radio to run a mission."
         elif snap.state == "running":
             status = phase if fresh_sim else "Waiting for simulation telemetry"
         elif snap.state == "failed" and snap.detail == "Unknown app":
@@ -1090,6 +1108,11 @@ class Window(QMainWindow):
             f"Link: {self.link_state}",
             f"Log folder: {self.log_folder or 'no connection yet'}",
         ]
+        if self.radio:
+            count = self.radio.engine.topic_messages_rx.get(24, 0)
+            lines.append(f"Jetson status frames received: {count}")
+            lines.append("Jetson status: " + (self.status_warning or
+                         ("current" if self.app_fresh() else "waiting for fresh telemetry")))
         QApplication.clipboard().setText("\n".join(lines))
         self.feedback.setText("Diagnostics copied.")
 
@@ -1226,6 +1249,7 @@ class Window(QMainWindow):
         self.radio = Radio(port, self.codec)
         self.station = Station(self.codec, self.radio, self.journal)
         self.app_snapshot = None
+        self.status_warning = ""
         self.app_stamp = self.app_received = self.pending_until = 0
         self.leave_job = None
         self.health_panel.reset_observations()
@@ -1289,13 +1313,15 @@ class Window(QMainWindow):
             if self.station is not st or not self.radio.ready or not self.start.isEnabled():
                 raise ValueError("Connection changed. Start canceled.")
             callsign, area, x, y, yaw = [e.text().strip() for e in edits]
-            self.station.start(callsign, area, (float(x), float(y), math.radians(float(yaw))))
+            home = (coordinate_value(x, "home map X"), coordinate_value(y, "home map Y"),
+                    math.radians(coordinate_value(yaw, "home heading")))
+            self.station.start(callsign, area, home)
             self.invalidate_draft()
             self.runway.reset_view()
             self.event_line("Start requested · Awaiting UGV acceptance")
 
     def map(self):
-        lat, lon = [float(e.text()) for e in self.coords[:2]]
+        lat, lon = (coordinate_value(e.text(), name) for e, name in zip(self.coords, ("latitude", "longitude")))
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise ValueError("Enter valid latitude and longitude first.")
         self.follow.setChecked(False)
@@ -1310,7 +1336,7 @@ class Window(QMainWindow):
             or self.draft != tuple(e.text() for e in self.coords)
         ):
             raise ValueError("Preview the current coordinates before sending.")
-        coords = tuple(float(e.text()) for e in self.coords)
+        coords = tuple(coordinate_value(e.text(), name) for e, name in zip(self.coords, ("latitude", "longitude", "altitude")))
         mission = self.station.add(*coords)
         self.runway.targets[mission] = coords[:2]
         if abs(coords[0]) <= 85.0511:
@@ -1410,12 +1436,23 @@ class Window(QMainWindow):
                     msg = self.codec.decode(data["payload"], name)
                     if topic == 24:
                         stamp = msg.stamp.sec * 10**9 + msg.stamp.nanosec
+                        now_ns = time.time_ns()
+                        timely = telemetry_time_ok(stamp, now_ns)
+                        if self.radio.ready and not timely and not self.app_fresh():
+                            warning = ("Jetson status is ahead of the GS clock. Sync both clocks."
+                                       if stamp > now_ns else "Jetson status arrived stale. Check clocks and radio delay.")
+                            if warning != self.status_warning:
+                                self.status_warning = warning
+                                self.event_line(warning)
+                                self.journal.log("status_rejected", warning, received=when,
+                                                 source_ns=stamp, age_ms=round((now_ns - stamp) / 1e6))
                         if (
                             self.radio.ready
                             and stamp >= self.track.connected
                             and stamp > self.app_stamp
-                            and -0.2 <= (time.time_ns() - stamp) / 1e9 < 3
+                            and 0 <= msg.stamp.nanosec < 10**9 and timely
                         ):
+                            self.status_warning = ""
                             msg.detail, separator, reply = msg.detail.partition("|d1:")
                             if separator and self.tests_dialog:
                                 self.tests_dialog.reply(reply)
@@ -1499,7 +1536,7 @@ class Window(QMainWindow):
                             self.radio.ready
                             and 0 <= msg.stamp.nanosec < 10**9
                             and stamp >= self.track.connected
-                            and -200_000_000 <= time.time_ns() - stamp <= 3_000_000_000
+                            and telemetry_time_ok(stamp, time.time_ns())
                         ):
                             points = route_points(msg.coordinates_e7)
                             if self.runway.tracks.replace(stamp, points):
@@ -1688,7 +1725,7 @@ class Window(QMainWindow):
         self.start.setEnabled(
             ready and not self.simulation
             and not (self.pending_until or (self.app_fresh() and self.app_snapshot.state in SIM_ACTIVE))
-            and not adapter_offline and not bringing_up
+            and not self.status_warning and not adapter_offline and not bringing_up
             and (
                 not st.session
                 or st.state

@@ -41,6 +41,8 @@ def test_light_map_preview_without_radio(window):
     w = window
     assert QApplication.palette().color(QPalette.ColorRole.Base).lightness() > 230
     assert not w.submit.isEnabled() and not w.approve.isEnabled()
+    w.preview.click()
+    assert "finite number for latitude" in w.feedback.text()
     w.coords[0].setText("95")
     w.coords[1].setText("0")
     w.preview.click()
@@ -296,10 +298,10 @@ def test_location_marker_and_freshness(window, monkeypatch):
         w.radio.receive(20, w.codec.encode(msg))
         w.tick()
 
-    for ts in (now - 10**9, now + 201_000_000):
+    for ts in (now - 10**9, now + 1_000_000_001):
         emit(ts)
         assert w.runway.robot is None
-    emit(now)
+    emit(now + 700_000_000)
     assert w.runway.robot == (0, 0, 0) and w.runway.center == (0, 0)
     assert w.locate.isEnabled() and w.runway.preview_location is None
     w.runway.preview(40, -83)
@@ -352,8 +354,22 @@ def test_jetson_instruments_and_stale_app_controls(window, monkeypatch):
     w.connect_radio()
     w.radio.ready = True
     msg = w.codec.types["FieldStatus"](w.codec.stamp(), "", "", "idle", "", 75, 1, False, 0, 0)
+    msg.stamp.sec += 2
     w.radio.receive(24, w.codec.encode(msg))
     w.tick()
+    w.sim_button.click()
+    assert "Sync both clocks" in w.job_label.text() and not w.launch_app.isEnabled()
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    records = [json.loads(line) for line in (w.log_folder / "events.jsonl").read_text().splitlines()]
+    warnings = [row for row in records if row["event"] == "status_rejected"]
+    assert len(warnings) == 1 and warnings[0]["age_ms"] < -200
+    w.field_button.click()
+    assert not w.start.isEnabled()
+    msg.stamp.sec, msg.stamp.nanosec = divmod(time.time_ns() + 700_000_000, 10**9)
+    w.radio.receive(24, w.codec.encode(msg))
+    w.tick()
+    assert not w.status_warning
     assert not w.start.isEnabled() and not w.launch_app.isEnabled()
     assert [widget.text() for widget in w.instruments] == ["75%", "Active", "—"]
     w.sim_button.click()
@@ -361,11 +377,12 @@ def test_jetson_instruments_and_stale_app_controls(window, monkeypatch):
     w.seed.setText("4294967296")
     w.launch_app.click()
     assert not sent
-    w.seed.setText("42")
+    w.seed.clear()
     w.launch_app.click()
-    assert len(sent) == 1 and sent[0].scenario == "42" and not sent[0].wait_timeout
+    assert len(sent) == 1 and 0 <= int(sent[0].scenario) <= 4294967295 and not sent[0].wait_timeout
     assert not w.launch_app.isEnabled() and not w.stop_app.isEnabled()
-    msg.job_id, msg.state, msg.stamp = sent[0].request_id, "running", w.codec.stamp()
+    msg.job_id, msg.state = sent[0].request_id, "running"
+    msg.stamp.sec, msg.stamp.nanosec = divmod(time.time_ns() + 700_000_000, 10**9)
     w.radio.receive(24, w.codec.encode(msg))
     w.tick()
     assert w.stop_app.isEnabled() and not w.launch_app.isEnabled()
